@@ -193,7 +193,7 @@ void nv2a_pb_scan_report(void)
  * ponytail: if the walk desynchronises (a run of words that decode as
  * nothing), GET snaps to PUT rather than wandering through guest RAM. */
 #define PB_PHYS_MASK 0x0FFFFFFCu
-#define PB_RAM_BYTES (64u * 1024u * 1024u)   /* XBOX_CONTIG_SIZE */
+#define PB_RAM_BYTES (128u * 1024u * 1024u)   /* XBOX_CONTIG_SIZE */
 
 /* A jump or call outside RAM means the walk is reading data as commands. */
 /* The last command headers decoded, so a desync can be traced back to the
@@ -466,6 +466,12 @@ int nv2a_pb_dma_walk(void)
 static int s_in_call;
 int nv2a_pb_scan_in_call(void) { return s_in_call; }
 
+/* SG1: where the last top-level JUMP (the ring's wrap) pointed and where it
+ * sat, so the caller can continue at the real start of the ring rather than
+ * at a guess learned from earlier PUTs. */
+static int      s_jump_seen;
+static uint32_t s_jump_target, s_jump_end;
+
 static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
                                 uint32_t *jumps, uint32_t *unknown)
 {
@@ -481,8 +487,12 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
             uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
                                              : (w & 0x1FFFFFFCu);
             (*jumps)++;
-            if (!in_call)
+            if (!in_call) {
+                s_jump_seen = 1;
+                s_jump_target = 0x80000000u | (target & 0x0FFFFFFFu);
+                s_jump_end = va;
                 break;                        /* the ring: a jump ends it */
+            }
             va = 0x80000000u | (target & 0x0FFFFFFFu);
             end_va = va + 0x400000u;
             continue;
@@ -543,4 +553,60 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
     s_tot_unknown += unknown;
     s_tot_jumps += jumps;
     s_tot_segments++;
+}
+
+
+/* SG1: scan what the title submitted between the previous PUT (from) and this
+ * one (to), following the ring's own wrap JUMP. hi is the highest PUT seen,
+ * used only as a bound when the data runs to the end of the ring. */
+extern uint64_t xbox_HostNowNs(void);
+uint64_t g_sg1_exec_ns;       /* SG1: time spent executing pushbuffer segments */
+static void nv2a_pb_scan_ring_inner(uint32_t from, uint32_t to, uint32_t hi, uint32_t lo);
+void nv2a_pb_scan_ring(uint32_t from, uint32_t to, uint32_t hi, uint32_t lo)
+{
+    uint64_t t0 = xbox_HostNowNs();
+    nv2a_pb_scan_ring_inner(from, to, hi, lo);
+    g_sg1_exec_ns += xbox_HostNowNs() - t0;
+}
+static void nv2a_pb_scan_ring_inner(uint32_t from, uint32_t to, uint32_t hi, uint32_t lo)
+{
+    /* SG1: on a wrap the title's last commands before the ring's JUMP were
+     * written after the highest PUT it ever kicked, so "hi" cut them off. Scan
+     * to the JUMP itself (the scan stops there), bounded by the ring size. */
+    uint32_t end = to > from ? to : from + 0x80000u;
+    (void)hi;
+
+    if (end <= from)
+        return;
+    s_jump_seen = 0;
+    nv2a_pb_scan_segment(from, end);
+    if (getenv("RECOMP_FLIP_LOG")) {
+        static int rl; if (rl++ < 6000)
+            fprintf(stderr, "[RING] from=%08X to=%08X hi=%08X lo=%08X jump=%d tgt=%08X jend=%08X\n",
+                    from, to, hi, lo, s_jump_seen, s_jump_target, s_jump_end);
+        if (to <= from) {
+            const uint8_t *m = (const uint8_t *)xbox_GetMemoryOffset();
+            fprintf(stderr, "[RINGWRAP] words@from: %08X %08X %08X %08X | @from+16: %08X %08X %08X %08X | @to: %08X %08X %08X %08X\n",
+                *(const uint32_t *)(m+from), *(const uint32_t *)(m+from+4), *(const uint32_t *)(m+from+8), *(const uint32_t *)(m+from+12),
+                *(const uint32_t *)(m+from+16), *(const uint32_t *)(m+from+20), *(const uint32_t *)(m+from+24), *(const uint32_t *)(m+from+28),
+                *(const uint32_t *)(m+to), *(const uint32_t *)(m+to+4), *(const uint32_t *)(m+to+8), *(const uint32_t *)(m+to+12));
+        }
+    }
+    if (s_jump_seen && (to <= from || s_jump_end < end)) {
+        /* wrapped: the rest of the submission starts at the jump's target */
+        uint32_t t = s_jump_target;
+        if (to > t)
+            nv2a_pb_scan_segment(t, to);
+    } else if (to <= from) {
+        /* SG1: no jump seen. The old guess (the lowest PUT ever seen) was the
+         * title's init pushbuffer, far below the ring, and scanning from it
+         * ran the executor over stale memory. The ring starts where PUT
+         * first lands after a wrap. */
+        static uint32_t ring_start;
+        (void)lo;
+        if (!ring_start)
+            ring_start = to;
+        if (to > ring_start)
+            nv2a_pb_scan_segment(ring_start, to);
+    }
 }

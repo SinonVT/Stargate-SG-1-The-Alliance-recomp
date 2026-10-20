@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <time.h>
 #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
@@ -377,6 +378,13 @@ static float reg_f(uint32_t method)
 
 /* Where BACK_END_WRITE_SEMAPHORE_RELEASE lands; see nv2a_backend.h. */
 static uint32_t s_sem_va;
+static uint32_t s_dbg_nop, s_dbg_nop_n, s_dbg_inc_n;
+static int s_prof = -1;
+static int prof_on(void) { if (s_prof < 0) s_prof = getenv("RECOMP_PROF") != NULL; return s_prof; }
+volatile uint64_t g_sg1_gap_ns, g_sg1_kicks;   /* time between pushbuffer kicks (the game producing) and kick count */
+volatile LONG64 g_rt_busy_ns, g_rt_wait_ns;   /* render thread: time replaying / executor: time held back by it */
+uint64_t g_p_meth_ns, g_p_meth_n, g_p_draw_ns, g_p_draw_n, g_p_bex_ns, g_p_tex_ns, g_p_rows_ns, g_p_batch_ns, g_p_xform_ns, g_p_rows_px, g_p_ntri;
+static int s_swap_seen, s_swap_real;   /* SG1: a FLIP_STALL is a real swap only after sw-method 1 */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
 
 /* Unhandled methods, ranked. The interesting output is not that something was
@@ -774,6 +782,364 @@ static void surface_apply_clip(void)
 /* ---- Render back end (nv2a_backend.h) ------------------------------- */
 
 static const Nv2aBackend *s_backend;
+static const Nv2aBackendEx *s_bex;      /* SG1: GPU back end (nv2a_backend.h) */
+
+/* SG1: cores this process may run on (GetSystemInfo can report fewer under a launcher) */
+static int sg1_usable_cores(int *sysn, unsigned long long *mask)
+{
+    SYSTEM_INFO si; DWORD_PTR pm = 0, sm = 0; int n = 0, i;
+    GetSystemInfo(&si);
+    *sysn = (int)si.dwNumberOfProcessors;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm) && pm) {
+        for (i = 0; i < (int)(8 * sizeof pm); i++) if ((pm >> i) & 1) n++;
+        *mask = (unsigned long long)pm;
+    } else { n = *sysn; *mask = 0; }
+    return n;
+}
+
+/* SG1: where the CPU goes, per thread (printed with the [RTT] line, RECOMP_FLIP_LOG only) */
+#include <tlhelp32.h>
+static DWORD s_tid_render, s_tid_exec, s_tid_xf[8];
+/* SG1: RECOMP_SAMPLE=1 -- sample where the busiest guest thread is executing. After a warm-up it
+ * picks the non-graphics thread using the most CPU, samples its instruction pointer every ~1 ms for
+ * RECOMP_SAMPLE_SECS (default 20) and writes sample.txt ("rva count", most frequent first). Match the
+ * rvas against sg1_alliance_recomp.map to name the functions. */
+static DWORD WINAPI sg1_sampler(LPVOID arg)
+{
+    typedef struct { DWORD64 rip; unsigned n; } Ent;
+    DWORD me = GetCurrentThreadId();
+    unsigned long long base = (unsigned long long)(uintptr_t)GetModuleHandleA(NULL);
+    DWORD target = 0, secs = 20;
+    const char *e = getenv("RECOMP_SAMPLE_SECS");
+    Ent *tab; size_t cap = 1u << 20, i;
+    unsigned long long total = 0;
+    (void)arg;
+    if (e && atoi(e) > 0) secs = (DWORD)atoi(e);
+    Sleep(15000);                                   /* the menu is up */
+    {   /* pick the busiest thread that is not one of ours */
+        struct { DWORD tid; unsigned long long t0, t1; } th[256]; int nth = 0, k;
+        for (k = 0; k < 2; k++) {
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); THREADENTRY32 te; int j;
+            if (snap == INVALID_HANDLE_VALUE) return 0;
+            te.dwSize = sizeof te;
+            if (Thread32First(snap, &te)) do {
+                HANDLE h; FILETIME c, ex, kk, u;
+                if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == me) continue;
+                h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+                if (!h) continue;
+                if (GetThreadTimes(h, &c, &ex, &kk, &u)) {
+                    unsigned long long t = (((unsigned long long)kk.dwHighDateTime << 32) | kk.dwLowDateTime)
+                                         + (((unsigned long long)u.dwHighDateTime << 32) | u.dwLowDateTime);
+                    for (j = 0; j < nth && th[j].tid != te.th32ThreadID; j++) ;
+                    if (j == nth && nth < 256) { th[nth].tid = te.th32ThreadID; th[nth].t0 = th[nth].t1 = t; nth++; }
+                    if (j < nth) { if (k == 0) th[j].t0 = t; th[j].t1 = t; }
+                }
+                CloseHandle(h);
+            } while (Thread32Next(snap, &te));
+            CloseHandle(snap);
+            if (k == 0) Sleep(2000);
+        }
+        {
+            unsigned long long best = 0;
+            for (k = 0; k < nth; k++) {
+                unsigned long long d = th[k].t1 - th[k].t0;
+                if (th[k].tid == s_tid_render || th[k].tid == s_tid_exec) continue;
+                { int q, isxf = 0; for (q = 0; q < 8; q++) if (s_tid_xf[q] == th[k].tid) isxf = 1; if (isxf) continue; }
+                if (d > best) { best = d; target = th[k].tid; }
+            }
+        }
+    }
+    if (!target) { fprintf(stderr, "[SAMPLE] no thread found\n"); return 0; }
+    tab = (Ent *)calloc(cap, sizeof *tab);
+    if (!tab) return 0;
+    fprintf(stderr, "[SAMPLE] sampling thread %lu for %lu s\n", (unsigned long)target, (unsigned long)secs);
+    {
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, target);
+        DWORD end = GetTickCount() + secs * 1000;
+        if (!h) { fprintf(stderr, "[SAMPLE] cannot open thread\n"); free(tab); return 0; }
+        while ((int)(end - GetTickCount()) > 0) {
+            CONTEXT cx;
+            memset(&cx, 0, sizeof cx);
+            cx.ContextFlags = CONTEXT_CONTROL;
+            if (SuspendThread(h) != (DWORD)-1) {
+                if (GetThreadContext(h, &cx)) {
+                    DWORD64 r = cx.Rip; size_t x = (size_t)((r * 11400714819323198485ull) >> 44) & (cap - 1);
+                    while (tab[x].n && tab[x].rip != r) x = (x + 1) & (cap - 1);
+                    tab[x].rip = r; tab[x].n++; total++;
+                }
+                ResumeThread(h);
+            }
+            Sleep(1);
+        }
+        CloseHandle(h);
+    }
+    {
+        FILE *f = fopen("sample.txt", "w");
+        if (f) {
+            fprintf(f, "# samples %llu, module base %llx\n", total, base);
+            for (i = 0; i < cap; i++) if (tab[i].n) fprintf(f, "%llx %u\n", (unsigned long long)tab[i].rip - base, tab[i].n);
+            fclose(f);
+            fprintf(stderr, "[SAMPLE] wrote sample.txt (%llu samples)\n", total);
+        }
+    }
+    free(tab);
+    return 0;
+}
+
+static void sg1_thread_report(void)
+{
+    s_tid_exec = GetCurrentThreadId();
+    static struct { DWORD tid; unsigned long long prev; } seen[256];
+    static int nseen;
+    static uint64_t last_ns;
+    uint64_t now = xbox_HostNowNs();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te;
+    DWORD pid = GetCurrentProcessId(), me = GetCurrentThreadId();
+    char line[1024]; int len = 0;
+    double wall;
+    if (snap == INVALID_HANDLE_VALUE) return;
+    wall = last_ns ? (double)(now - last_ns) / 1e6 : 0.0;
+    te.dwSize = sizeof te;
+    if (Thread32First(snap, &te)) do {
+        HANDLE h; FILETIME c, e, k, u; unsigned long long t; int i, idx = -1;
+        if (te.th32OwnerProcessID != pid) continue;
+        h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        if (GetThreadTimes(h, &c, &e, &k, &u)) {
+            t = (((unsigned long long)k.dwHighDateTime << 32) | k.dwLowDateTime)
+              + (((unsigned long long)u.dwHighDateTime << 32) | u.dwLowDateTime);   /* 100 ns */
+            for (i = 0; i < nseen; i++) if (seen[i].tid == te.th32ThreadID) { idx = i; break; }
+            if (idx < 0 && nseen < 256) { idx = nseen++; seen[idx].tid = te.th32ThreadID; seen[idx].prev = t; }
+            else if (idx >= 0) {
+                double ms = (double)(t - seen[idx].prev) / 1e4;
+                seen[idx].prev = t;
+                if (wall > 0 && ms > wall * 0.04 && len < 900) {
+                    const char *nm = te.th32ThreadID == me ? "executor" : te.th32ThreadID == s_tid_render ? "render" : "other";
+                    for (i = 0; i < 8; i++) if (s_tid_xf[i] == te.th32ThreadID) nm = "xform";
+                    len += snprintf(line + len, sizeof line - len, " %s#%lu=%.0f%%", nm, (unsigned long)te.th32ThreadID, 100.0 * ms / wall);
+                }
+            }
+        }
+        CloseHandle(h);
+    } while (Thread32Next(snap, &te));
+    CloseHandle(snap);
+    last_ns = now;
+    if (len) fprintf(stderr, "[THREADS] cpu use since last report:%s\n", line);
+}
+
+/* ---- SG1: render thread ----------------------------------------------------
+ * The GPU back end (D3D11) is driven from its own thread. The executor copies each clear, draw and
+ * present into a queue and goes on emulating; the render thread replays them in order. At most
+ * RECOMP_RT_AHEAD frames (default 1) are queued behind the one being rendered, which also bounds
+ * memory. The back end reads textures from guest memory when it replays a draw, so a texture the
+ * title rewrites within a frame or two can show the newer data. RECOMP_RENDER_THREAD=0 turns it off. */
+typedef enum { RC_CLEAR, RC_DRAW, RC_PRESENT, RC_FLIP, RC_FRAME } RcType;
+typedef struct RtCmd {
+    struct RtCmd *next;
+    int type;
+    size_t bytes;
+    int cls;                    /* size class for the free list */
+    Nv2aSurface surf;
+    Nv2aRenderState rs;
+    uint32_t flags, argb, zs;
+    uint32_t va, pitch, bpp, aa, do_present;
+    Nv2aBatchEx b;
+    Nv2aXfVertex v[1];
+} RtCmd;
+
+static const Nv2aBackendEx *s_real_bex;
+static Nv2aBackendEx s_rt_bex;
+static int s_rt_on;
+static CRITICAL_SECTION s_rt_cs;
+static RtCmd *s_rt_head, *s_rt_tail;
+static HANDLE s_rt_wake, s_rt_space;
+static volatile LONG s_rt_waiting, s_rt_frames_sub, s_rt_frames_done;
+static volatile LONG64 s_rt_bytes;
+static int s_rt_ahead = 1;
+
+static void rt_push(RtCmd *c)
+{
+    while (s_rt_bytes > ((LONG64)256 << 20)) {          /* a frame this big: wait for the thread */
+        InterlockedExchange(&s_rt_waiting, 1);
+        WaitForSingleObject(s_rt_space, 20);
+    }
+    InterlockedAdd64(&s_rt_bytes, (LONG64)c->bytes);
+    c->next = NULL;
+    EnterCriticalSection(&s_rt_cs);
+    if (s_rt_tail) s_rt_tail->next = c; else s_rt_head = c;
+    s_rt_tail = c;
+    LeaveCriticalSection(&s_rt_cs);
+    SetEvent(s_rt_wake);
+}
+
+/* Blocks are recycled by power-of-two vertex capacity: a fresh multi-megabyte malloc per draw cost
+ * more in page faults than the copy itself. */
+#define RT_CLASSES 24
+#define RT_KEEP 12
+static RtCmd *s_rt_free[RT_CLASSES];
+static int    s_rt_nfree[RT_CLASSES];
+
+static RtCmd *rt_new(int type, uint32_t nverts)
+{
+    int cls = 0;
+    size_t cap, bytes;
+    RtCmd *c;
+    while (((size_t)1 << cls) < (nverts ? nverts : 1) && cls < RT_CLASSES - 1) cls++;
+    cap = (size_t)1 << cls;
+    EnterCriticalSection(&s_rt_cs);
+    c = s_rt_free[cls];
+    if (c) { s_rt_free[cls] = c->next; s_rt_nfree[cls]--; }
+    LeaveCriticalSection(&s_rt_cs);
+    bytes = offsetof(RtCmd, v) + cap * sizeof(Nv2aXfVertex);
+    if (!c) {
+        c = (RtCmd *)malloc(bytes);
+        if (!c) return NULL;
+    }
+    memset(c, 0, offsetof(RtCmd, v));
+    c->type = type;
+    c->bytes = bytes;
+    c->cls = cls;
+    return c;
+}
+
+static void rt_release(RtCmd *c)
+{
+    int cls = c->cls;
+    EnterCriticalSection(&s_rt_cs);
+    if (s_rt_nfree[cls] < RT_KEEP) {
+        c->next = s_rt_free[cls]; s_rt_free[cls] = c; s_rt_nfree[cls]++;
+        c = NULL;
+    }
+    LeaveCriticalSection(&s_rt_cs);
+    if (c) free(c);
+}
+
+static DWORD WINAPI rt_thread(LPVOID arg)
+{
+    (void)arg;
+    s_tid_render = GetCurrentThreadId();
+    for (;;) {
+        RtCmd *c;
+        EnterCriticalSection(&s_rt_cs);
+        c = s_rt_head;
+        if (c) { s_rt_head = c->next; if (!s_rt_head) s_rt_tail = NULL; }
+        LeaveCriticalSection(&s_rt_cs);
+        if (!c) { WaitForSingleObject(s_rt_wake, INFINITE); continue; }
+        { uint64_t _b0 = xbox_HostNowNs();
+        switch (c->type) {
+        case RC_CLEAR:
+            if (s_real_bex->clear) s_real_bex->clear(&c->surf, &c->rs, c->flags, c->argb, c->zs);
+            break;
+        case RC_DRAW:
+            c->b.vertices = c->v;
+            c->b.state = &c->rs;
+            if (s_real_bex->draw) s_real_bex->draw(&c->surf, &c->b);
+            break;
+        case RC_PRESENT: {
+            extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
+            if (s_real_bex->resolve) s_real_bex->resolve(c->va, c->pitch, c->bpp);
+            if (c->do_present) {
+                xbox_FramebufferWindowSet(c->va, c->pitch);
+                xbox_FramebufferWindowSetAA(c->aa);
+                xbox_FramebufferWindowPresent(c->va, c->pitch);
+            }
+            break;
+        }
+        case RC_FLIP:
+            if (s_real_bex->flip) s_real_bex->flip();
+            break;
+        case RC_FRAME:
+            InterlockedIncrement(&s_rt_frames_done);
+            break;
+        }
+        InterlockedAdd64(&g_rt_busy_ns, (LONG64)(xbox_HostNowNs() - _b0)); }
+        InterlockedAdd64(&s_rt_bytes, -(LONG64)c->bytes);
+        rt_release(c);
+        if (InterlockedExchange(&s_rt_waiting, 0)) SetEvent(s_rt_space);
+    }
+    return 0;
+}
+
+static void rt_clear(const Nv2aSurface *surf, const Nv2aRenderState *rs, uint32_t flags, uint32_t argb, uint32_t zs)
+{
+    RtCmd *c = rt_new(RC_CLEAR, 0);
+    if (!c) return;
+    c->surf = *surf; c->rs = *rs; c->flags = flags; c->argb = argb; c->zs = zs;
+    rt_push(c);
+}
+
+static void rt_draw(const Nv2aSurface *surf, const Nv2aBatchEx *b)
+{
+    RtCmd *c = rt_new(RC_DRAW, b->count);
+    if (!c) return;
+    c->surf = *surf;
+    c->b = *b;
+    c->rs = *b->state;
+    memcpy(c->v, b->vertices, (size_t)b->count * sizeof(Nv2aXfVertex));
+    rt_push(c);
+}
+
+static void rt_resolve(uint32_t va, uint32_t pitch, uint32_t bpp)
+{
+    RtCmd *c = rt_new(RC_PRESENT, 0);
+    if (!c) return;
+    c->va = va; c->pitch = pitch; c->bpp = bpp; c->do_present = 0;
+    rt_push(c);
+}
+
+static void rt_submit_present(uint32_t va, uint32_t pitch, uint32_t bpp, uint32_t aa)
+{
+    RtCmd *c = rt_new(RC_PRESENT, 0);
+    if (!c) return;
+    c->va = va; c->pitch = pitch; c->bpp = bpp; c->aa = aa; c->do_present = 1;
+    rt_push(c);
+}
+
+static void rt_flip(void)
+{
+    RtCmd *c = rt_new(RC_FLIP, 0);
+    if (c) rt_push(c);
+    c = rt_new(RC_FRAME, 0);
+    if (c) rt_push(c);
+    InterlockedIncrement(&s_rt_frames_sub);
+    /* do not run more than s_rt_ahead frames in front of the renderer */
+    { uint64_t _w0 = xbox_HostNowNs();
+    while (s_rt_frames_sub - s_rt_frames_done > s_rt_ahead + 0) {
+        InterlockedExchange(&s_rt_waiting, 1);
+        WaitForSingleObject(s_rt_space, 20);
+    }
+    InterlockedAdd64(&g_rt_wait_ns, (LONG64)(xbox_HostNowNs() - _w0)); }
+}
+
+void nv2a_backend_register_ex(const Nv2aBackendEx *backend)
+{
+    const char *e = getenv("RECOMP_RENDER_THREAD");
+    int sysn, cores; unsigned long long am;
+    cores = sg1_usable_cores(&sysn, &am);
+    s_bex = backend;
+    if (getenv("RECOMP_SAMPLE")) CloseHandle(CreateThread(NULL, 0, sg1_sampler, NULL, 0, NULL));
+    fprintf(stderr, "[RT] cores: system %d, usable by this process %d (affinity %llx)\n", sysn, cores, am);
+    /* needs spare cores: on 2-3 cores the extra copying and contention cost more than the overlap gains */
+    if (!backend || (e ? e[0] == '0' : cores < 4))
+        return;
+    {
+        const char *a = getenv("RECOMP_RT_AHEAD");
+        if (a && atoi(a) >= 0) s_rt_ahead = atoi(a);
+    }
+    s_real_bex = backend;
+    s_rt_bex.clear = rt_clear;
+    s_rt_bex.draw = rt_draw;
+    s_rt_bex.resolve = rt_resolve;
+    s_rt_bex.flip = rt_flip;
+    InitializeCriticalSection(&s_rt_cs);
+    s_rt_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    s_rt_space = CreateEventA(NULL, FALSE, FALSE, NULL);
+    CloseHandle(CreateThread(NULL, 0, rt_thread, NULL, 0, NULL));
+    s_bex = &s_rt_bex;
+    s_rt_on = 1;
+    fprintf(stderr, "[RT] render thread on (frames ahead %d); RECOMP_RENDER_THREAD=0 disables\n", s_rt_ahead);
+}
 
 void nv2a_backend_register(const Nv2aBackend *backend)
 {
@@ -831,31 +1197,34 @@ static void current_render_state(Nv2aRenderState *r)
 
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
 
+static int sample_tex(const Texture *t, uint32_t face_offset, uint32_t u, uint32_t v, uint32_t *argb);
 int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
 {
-    Texture saved = s_gpu.texs[0];
+    /* SG1: decodes through a private Texture, never s_gpu -- the render thread calls this while
+     * the executor is running. */
+    Texture t;
     uint32_t x, y;
     int ok = 1;
 
-    s_gpu.texs[0].offset = tex->offset;
-    s_gpu.texs[0].width  = tex->width;
-    s_gpu.texs[0].height = tex->height;
-    s_gpu.texs[0].pitch  = tex->pitch;
-    s_gpu.texs[0].color  = tex->color;
-    s_gpu.texs[0].addr_u = 3;
-    s_gpu.texs[0].addr_v = 3;
-    s_gpu.texs[0].palette = 0;          /* ponytail: no palettised formats */
-    s_gpu.texs[0].levels = 1;
-    s_gpu.texs[0].filter = 0;
-    s_gpu.texs[0].cube   = 0;
-    s_gpu.texs[0].valid  = 1;
+    memset(&t, 0, sizeof t);
+    t.offset = tex->offset;
+    t.width  = tex->width;
+    t.height = tex->height;
+    t.pitch  = tex->pitch;
+    t.color  = tex->color;
+    t.addr_u = 3;
+    t.addr_v = 3;
+    t.palette = 0;          /* ponytail: no palettised formats */
+    t.levels = 1;
+    t.filter = 0;
+    t.cube   = 0;
+    t.valid  = 1;
     for (y = 0; y < tex->height && ok; y++)
         for (x = 0; x < tex->width; x++)
-            if (!sample_texture(x, y, &argb_out[(size_t)y * tex->width + x])) {
+            if (!sample_tex(&t, 0, x, y, &argb_out[(size_t)y * tex->width + x])) {
                 ok = 0;
                 break;
             }
-    s_gpu.texs[0] = saved;
     return ok;
 }
 
@@ -890,6 +1259,18 @@ static void clear_surface(uint32_t param)
     uint32_t bpp = surface_bpp();
     uint32_t y, x;
 
+    if (s_bex && s_bex->clear) {
+        Nv2aSurface surf;
+        Nv2aRenderState rs;
+
+        if (!s_gpu.color_offset || !s_gpu.pitch || !s_gpu.clip_h || bpp == 0)
+            return;
+        current_surface(&surf);
+        current_render_state(&rs);
+        s_bex->clear(&surf, &rs, param, s_gpu.clear_color, s_gpu.zstencil_clear);
+        s_gpu.clears++;
+        return;
+    }
     /* A back end clears colour and/or depth/stencil itself (flags are the
      * CLEAR_SURFACE bits: Z 0x1, stencil 0x2, colour 0xF0). */
     if (s_backend && s_backend->clear) {
@@ -1776,6 +2157,13 @@ static int ffp_flip_normals(void)
     return on;
 }
 
+/* scratch of lit_color: per thread, the vertex transform runs on several */
+#ifdef _MSC_VER
+__declspec(thread) static float s_sg1_em[3], s_sg1_ma[3], s_sg1_md[3], s_sg1_alpha;
+#else
+static _Thread_local float s_sg1_em[3], s_sg1_ma[3], s_sg1_md[3], s_sg1_alpha;
+#endif
+
 static int lit_color(uint32_t index, float out[4])
 {
     const float *mv = (const float *)&s_reg[0x0480 / 4];
@@ -1789,6 +2177,28 @@ static int lit_color(uint32_t index, float out[4])
      || !fetch_attr(&s_gpu.attr[2], index, nrm))
         return 0;
     have_vc = fetch_attr(color_attr(), index, vc);
+    /* SG1 colour material: COLOR_MATERIAL (0x0298) picks, per term, the material
+     * (0), vertex colour 1 (1, diffuse) or vertex colour 2 (2, specular):
+     * emission bits 0-1, ambient 2-3, diffuse 4-5. The old code only knew
+     * source 1 for ambient/diffuse and ignored emission and source 2, so a
+     * title that lights with colour 2 (or takes emission from the vertex) got
+     * a black diffuse colour. */
+    {
+        float vs[4];
+        int src_e = (int)(colmat & 3), src_a = (int)((colmat >> 2) & 3), src_d = (int)((colmat >> 4) & 3);
+        float em[3] = {0, 0, 0}, ma[3] = {1, 1, 1}, md[3] = {1, 1, 1}, alpha_v = reg_f(0x03B4);
+        int k;
+        fetch_attr(&s_gpu.attr[4], index, vs);
+        if (!have_vc) vc[0] = vc[1] = vc[2] = vc[3] = 1.0f;
+        for (k = 0; k < 3; k++) {
+            em[k] = src_e == 1 ? vc[k] : src_e == 2 ? vs[k] : 0.0f;
+            ma[k] = src_a == 1 ? vc[k] : src_a == 2 ? vs[k] : 1.0f;
+            md[k] = src_d == 1 ? vc[k] : src_d == 2 ? vs[k] : 1.0f;
+        }
+        if (src_d == 1) alpha_v = vc[3]; else if (src_d == 2) alpha_v = vs[3];
+        memcpy(s_sg1_em, em, sizeof em); memcpy(s_sg1_ma, ma, sizeof ma);
+        memcpy(s_sg1_md, md, sizeof md); s_sg1_alpha = alpha_v;
+    }
 
     for (i = 0; i < 3; i++) {
         e[i] = mv[4 * i] * pos[0] + mv[4 * i + 1] * pos[1]
@@ -1816,7 +2226,9 @@ static int lit_color(uint32_t index, float out[4])
         n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
     }
 
-    out[0] = reg_f(0x0A10); out[1] = reg_f(0x0A14); out[2] = reg_f(0x0A18);
+    out[0] = s_sg1_em[0] + reg_f(0x0A10) * s_sg1_ma[0];
+    out[1] = s_sg1_em[1] + reg_f(0x0A14) * s_sg1_ma[1];
+    out[2] = s_sg1_em[2] + reg_f(0x0A18) * s_sg1_ma[2];
     for (i = 0; i < NV_LIGHTS; i++) {
         uint32_t kind = (mask >> (2 * i)) & 3, b = 0x1000 + (uint32_t)i * 0x80;
         float l[3], att = 1.0f, ndl, amb[3], dif[3];
@@ -1845,14 +2257,22 @@ static int lit_color(uint32_t index, float out[4])
             dif[k] = reg_f(b + 0x0C + 4 * k);
             /* COLOR_MATERIAL: 1 in the ambient (bits 2-3) or diffuse (bits
              * 4-5) field takes that material colour from the vertex. */
-            if (have_vc && ((colmat >> 2) & 3) == 1) amb[k] *= vc[k];
-            if (have_vc && ((colmat >> 4) & 3) == 1) dif[k] *= vc[k];
+            amb[k] *= s_sg1_ma[k];
+            dif[k] *= s_sg1_md[k];
             out[k] += att * (amb[k] + dif[k] * ndl);
         }
     }
-    out[3] = (have_vc && ((colmat >> 4) & 3) == 1) ? vc[3] : reg_f(0x03B4);
+    out[3] = s_sg1_alpha;
     for (i = 0; i < 4; i++)
         out[i] = out[i] < 0.0f ? 0.0f : out[i] > 1.0f ? 1.0f : out[i];
+    {   /* SG1: lighting left on with no light enabled and nothing feeding the colour
+         * (the HUD portrait, weapon icons, particles): the hardware shows the vertex
+         * colour there, the sum above comes out black. RECOMP_FFP_UNLIT_FIX=0 turns this off. */
+        static int fix = -1;
+        if (fix < 0) { const char *e = getenv("RECOMP_FFP_UNLIT_FIX"); fix = !(e && e[0] == '0'); }
+        if (fix && mask == 0 && (colmat & 3u) != 1u && out[0] + out[1] + out[2] == 0.0f)   /* emission from the vertex colour: black is real (glass: black, alpha 0) */
+            return 0;
+    }
     return 1;
 }
 
@@ -2059,6 +2479,88 @@ static void backend_flush(int textured)
     note_drawn();
 }
 
+/* SG1: triangles bound for the extended GPU back end. */
+#define NV_BEX_MAX_VERTS (NV_MAX_INDICES * 3)
+static Nv2aXfVertex *s_bxv;
+static uint32_t      s_bxn;
+
+static int batch_uses_program(void);
+static void bex_flush_inner(void);
+static void bex_flush(void)
+{ uint64_t _t0; if (!prof_on()) { bex_flush_inner(); return; } _t0 = xbox_HostNowNs(); bex_flush_inner(); g_p_bex_ns += xbox_HostNowNs() - _t0; }
+static void bex_flush_inner(void)
+{
+    Nv2aSurface surf;
+    Nv2aRenderState rs;
+    Nv2aBatchEx b;
+    int st;
+    static int no_rc = -1;
+
+    if (!s_bex || !s_bxn)
+        return;
+    if (no_rc < 0)
+        no_rc = getenv("RECOMP_NO_COMBINERS") != NULL;
+    current_surface(&surf);
+    current_render_state(&rs);
+    memset(&b, 0, sizeof b);
+    b.vertices = s_bxv;
+    b.count = s_bxn;
+    b.state = &rs;
+    b.use_rc = s_gpu.rc_seen && !no_rc;
+    for (st = 0; st < 4; st++) {
+        const Texture *t = &s_gpu.texs[st];
+        b.tex_valid[st] = t->valid ? 1u : 0u;
+        if (st == 0 && !b.use_rc && s_xf_no_tex)
+            b.tex_valid[st] = 0;
+        b.tex[st].offset = t->offset;
+        b.tex[st].width  = t->width;
+        b.tex[st].height = t->height;
+        b.tex[st].pitch  = t->pitch;
+        b.tex[st].color  = t->color;
+        b.tex[st].addr_u = t->addr_u;
+        b.tex[st].addr_v = t->addr_v;
+        b.tex[st].levels = t->pitch ? 1 : t->levels;
+        b.tex[st].filter = t->filter;
+        b.tex_texel_uv[st] = tex_size_from_format(t->color) ? 0u : 1u;
+        b.tex_border_on[st] = t->border_color ? 1u : 0u;
+        b.tex_border[st] = t->border;
+    }
+    memcpy(&b.rc, &s_gpu.rc, sizeof b.rc);
+    nv2a_rc_unpack(s_gpu.fog_color, b.fog_color);
+    { float r = b.fog_color[2]; b.fog_color[2] = b.fog_color[0]; b.fog_color[0] = r; }
+    {   /* SG1: where does the diffuse of a HUD icon quad come from? */
+        static unsigned nb, nw;
+        const Texture *t0 = &s_gpu.texs[0];
+        if (t0->valid && ((t0->color == 0x0E && t0->width >= 32 && t0->width <= 64 && s_bxn <= 12) || ((t0->color == 0x0C || t0->color == 0x0E) && t0->width >= 128 && s_bxn >= 6 && s_bxn <= 150))) {
+            int blk = (s_bxv[0].d0[0] + s_bxv[0].d0[1] + s_bxv[0].d0[2]) == 0.0f;
+            if ((blk && nb < 60) || (!blk && nw < 40)) {
+                const uint8_t *m = (const uint8_t *)xbox_GetMemoryOffset();
+                const VertexAttr *a3 = &s_gpu.attr[3];
+                uint32_t raw = (a3->size && a3->offset) ? *(const uint32_t *)(m + dma_resolve(a3->offset)) : 0;
+                if (blk) nb++; else nw++;
+                fprintf(stderr, "[HUDATTR] %s tex=%08X %ux%u n=%u attr3{off=%08X type=%u size=%u stride=%u raw0=%08X} imm3=(%.2f %.2f %.2f %.2f) imm_used=%04X d0=(%.2f %.2f %.2f %.2f) prog=%d\n",
+                        blk ? "BLACK" : "ok", t0->offset, t0->width, t0->height, s_bxn,
+                        a3->offset, a3->type, a3->size, a3->stride, raw,
+                        s_gpu.imm_attr[3][0], s_gpu.imm_attr[3][1], s_gpu.imm_attr[3][2], s_gpu.imm_attr[3][3],
+                        (unsigned)s_gpu.imm_used, s_bxv[0].d0[0], s_bxv[0].d0[1], s_bxv[0].d0[2], s_bxv[0].d0[3], batch_uses_program());
+                fprintf(stderr, "[HUDLIT]   lighting=%u lightmask=%08X colmat=%08X attr2{size=%u off=%08X} attr4{size=%u} composite=%d xf_mode=%u scene_amb=(%.2f %.2f %.2f) inline=%d idx=%u\n",
+                        s_reg[0x0314 / 4], s_reg[0x03BC / 4], s_reg[0x0298 / 4], s_gpu.attr[2].size, s_gpu.attr[2].offset, s_gpu.attr[4].size,
+                        (int)s_gpu.composite_set, (unsigned)s_gpu.xf_mode, reg_f(0x0A10), reg_f(0x0A14), reg_f(0x0A18), (int)s_gpu.inline_active, 0u);
+                {   uint32_t ra; fprintf(stderr, "[HUDREG]  ");
+                    for (ra = 0x0980; ra < 0x0A40; ra += 4) if (s_reg[ra / 4]) fprintf(stderr, " %04X=%g", ra, reg_f(ra));
+                    fprintf(stderr, " | 0290..2A0:");
+                    for (ra = 0x0290; ra < 0x02A4; ra += 4) fprintf(stderr, " %08X", s_reg[ra / 4]);
+                    fprintf(stderr, "\n"); }
+                fflush(stderr);
+            }
+        }
+    }
+    s_bex->draw(&surf, &b);
+    s_gpu.tris_drawn += s_bxn / 3;
+    s_bxn = 0;
+    note_drawn();
+}
+
 /* One triangle by vertex index: gather position and, if the batch has one,
  * texture coordinate 0. A vertex whose position cannot be read is not drawn;
  * a batch whose texcoords cannot be read is drawn untextured rather than not
@@ -2068,6 +2570,9 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
 {
     float p[3][4], uv[3][2];
     int textured, j;
+
+    if (s_bex)
+        return;                    /* SG1: screen-space batches not on the GPU path */
 
     if (!fetch_attr(&s_gpu.attr[0], i0, p[0])
      || !fetch_attr(&s_gpu.attr[0], i1, p[1])
@@ -2618,7 +3123,7 @@ static void xf_queue_flush(void)
         return;
     for (i = 0; i < s_xfq_n; i++)
         s_xfq_tris[i] = s_xfq[i].t;
-    xf_rows_parallel(s_xfq_tris, s_xfq_n, s_xfq_px, &cnt);
+    { uint64_t _t0 = xbox_HostNowNs(); xf_rows_parallel(s_xfq_tris, s_xfq_n, s_xfq_px, &cnt); g_p_rows_ns += xbox_HostNowNs() - _t0; g_p_rows_px += (uint64_t)s_xfq_px; g_p_ntri += (uint64_t)s_xfq_n; }
     s_gpu.xf_depth_fail += cnt.depth_fail;
     s_gpu.xf_pixels += cnt.pixels;
     s_gpu.zpass_count += cnt.zpass;
@@ -2677,6 +3182,37 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
     area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
     if (area == 0.0f || area != area) {
         s_gpu.xf_degenerate++;
+        return;
+    }
+    {   /* SG1 debug: how many lit triangles come out black */
+        static unsigned xn, xb, xprog, xprogb;
+        xn++;
+        if ((s_gpu.xf_mode & 3) == 2) { xprog++; if (v[0]->d0[0] + v[0]->d0[1] + v[0]->d0[2] == 0.0f) xprogb++; }
+        if (v[0]->d0[0] + v[0]->d0[1] + v[0]->d0[2] + v[1]->d0[0] + v[1]->d0[1] + v[1]->d0[2]
+              + v[2]->d0[0] + v[2]->d0[1] + v[2]->d0[2] == 0.0f)
+            xb++;
+        if (xn >= 300000) {
+            if (getenv("RECOMP_FLIP_LOG"))
+                fprintf(stderr, "[XFD0] tris %u black-diffuse %u (%.1f%%) gpu=%d | program tris %u (black v0 %u) | cur: mode %u light_en %u mask %08X ambient %.2f %.2f %.2f L0 amb %.2f %.2f %.2f dif %.2f %.2f %.2f normals %u colmat %08X\n", xn, xb, 100.0 * xb / xn, s_bex != NULL,
+                        xprog, xprogb, s_gpu.xf_mode, s_reg[0x0314 / 4], s_reg[0x03BC / 4],
+                        reg_f(0x0A10), reg_f(0x0A14), reg_f(0x0A18),
+                        reg_f(0x1000), reg_f(0x1004), reg_f(0x1008), reg_f(0x100C), reg_f(0x1010), reg_f(0x1014),
+                        s_gpu.attr[2].size, s_reg[0x0298 / 4]);
+            xn = xb = xprog = xprogb = 0;
+        }
+    }
+    if (s_bex) {                               /* SG1: GPU back end */
+        Nv2aXfVertex *o;
+        if (!s_bxv && !(s_bxv = (Nv2aXfVertex *)calloc(NV_BEX_MAX_VERTS, sizeof *s_bxv)))
+            return;
+        if (s_bxn + 3 > NV_BEX_MAX_VERTS)
+            bex_flush();
+        o = &s_bxv[s_bxn];
+        for (k = 0; k < 3; k++) {
+            memcpy(&o[k], v[k], sizeof o[k]);
+            o[k].fog[0] = fog_factor(v[k]->fog[0]);
+        }
+        s_bxn += 3;
         return;
     }
     if (backend_draws()) {                     /* a back end rasterises */
@@ -2927,15 +3463,108 @@ static void xf_set_viewport(void)
     s_xf_o[2] = of[2];
 }
 
+/* SG1: parallel vertex transform */
+#define XF_MAX_THREADS 8
+typedef struct { uint32_t *stamp, *key, *slot; uint32_t gen; int ok; } XfCache;
+static XfCache s_xfc[XF_MAX_THREADS];
+static struct { HANDLE start[XF_MAX_THREADS], done; volatile LONG pending, fail; uint32_t lo[XF_MAX_THREADS], hi[XF_MAX_THREADS]; int n; } s_xp;
+extern int nv2a_vsh_cxt_write_enabled(void);
+
+static int xf_chunk(uint32_t lo, uint32_t hi, XfCache *c)
+{
+    uint32_t i;
+    if (!c->ok) {
+        const char *e = getenv("RECOMP_XF_CACHE");
+        c->ok = (e && e[0] == '0') ? -1 : 1;
+        if (c->ok > 0) {
+            c->stamp = (uint32_t *)calloc(65536, 4); c->key = (uint32_t *)calloc(65536, 4); c->slot = (uint32_t *)calloc(65536, 4);
+            if (!c->stamp || !c->key || !c->slot) c->ok = -1;
+        }
+    }
+    c->gen++;
+    if (c->gen == 0) { if (c->ok > 0) memset(c->stamp, 0, 65536 * 4); c->gen = 1; }
+    for (i = lo; i < hi; i++) {
+        uint32_t ix = s_gpu.idx[i], h = (ix * 2654435761u) >> 16;
+        if (c->ok > 0 && c->stamp[h] == c->gen && c->key[h] == ix) {
+            memcpy(&s_xf[i], &s_xf[c->slot[h]], sizeof s_xf[i]);
+            continue;
+        }
+        if (!transform_vertex(ix, &s_xf[i]))
+            return 0;
+        if (c->ok > 0) { c->stamp[h] = c->gen; c->key[h] = ix; c->slot[h] = i; }
+    }
+    return 1;
+}
+
+static DWORD WINAPI xf_worker(LPVOID arg)
+{
+    int k = (int)(intptr_t)arg;
+    s_tid_xf[k & 7] = GetCurrentThreadId();
+    for (;;) {
+        WaitForSingleObject(s_xp.start[k], INFINITE);
+        if (!xf_chunk(s_xp.lo[k], s_xp.hi[k], &s_xfc[k])) InterlockedExchange(&s_xp.fail, 1);
+        if (InterlockedDecrement(&s_xp.pending) == 0) SetEvent(s_xp.done);
+    }
+    return 0;
+}
+
+static int xf_threads(void)
+{
+    static int init;
+    if (!init) {
+        const char *e = getenv("RECOMP_XF_THREADS");
+        int n, k, sysn, cores; unsigned long long am; const char *e2;
+        init = 1;
+        cores = sg1_usable_cores(&sysn, &am); e2 = e;
+        n = e ? atoi(e) : (cores >= 4 ? cores - 1 : 1);
+        if (n > 4 && !e) n = 4;
+        if (n < 1) n = 1;
+        if (n > XF_MAX_THREADS) n = XF_MAX_THREADS;
+        s_xp.n = n;
+        if (n > 1) {
+            s_xp.done = CreateEventA(NULL, FALSE, FALSE, NULL);
+            for (k = 1; k < n; k++) {
+                s_xp.start[k] = CreateEventA(NULL, FALSE, FALSE, NULL);
+                CloseHandle(CreateThread(NULL, 0, xf_worker, (LPVOID)(intptr_t)k, 0, NULL));
+            }
+        }
+        fprintf(stderr, "[XF] vertex transform threads: %d (cores %d, RECOMP_XF_THREADS=%s)\n", n, cores, e2 ? e2 : "unset");
+    }
+    return s_xp.n;
+}
+
+static void raster_batch_program_inner(void);
 static void raster_batch_program(void)
+{ uint64_t _t0; if (!prof_on()) { raster_batch_program_inner(); return; } _t0 = xbox_HostNowNs(); raster_batch_program_inner(); g_p_batch_ns += xbox_HostNowNs() - _t0; }
+static void raster_batch_program_inner(void)
 {
     uint32_t i, n = s_gpu.idx_count;
 
     if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
         return;
-    for (i = 0; i < n; i++)
-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
-            return;                                    /* no program loaded */
+    { uint64_t _t0 = prof_on() ? xbox_HostNowNs() : 0;
+      /* SG1: vertices are transformed in chunks, one per thread (RECOMP_XF_THREADS, default: cores - 1
+       * up to 4; 1 = serial). An indexed mesh lists each vertex in several triangles, so each chunk
+       * keeps its own cache. RECOMP_XF_CACHE=0 turns the caches off. */
+      int nth = xf_threads();
+      if (nth > 1 && n >= 384 && !nv2a_vsh_cxt_write_enabled()) {
+          int k, chunks = nth;
+          uint32_t per = (n + chunks - 1) / chunks;
+          (void)transform_vertex(s_gpu.idx[0], &s_xf[0]);      /* first-use init on this thread */
+          s_xp.fail = 0;
+          s_xp.pending = chunks - 1;
+          for (k = 0; k < chunks; k++) {
+              s_xp.lo[k] = (uint32_t)k * per < n ? (uint32_t)k * per : n;
+              s_xp.hi[k] = (uint32_t)(k + 1) * per < n ? (uint32_t)(k + 1) * per : n;
+          }
+          for (k = 1; k < chunks; k++) SetEvent(s_xp.start[k]);
+          if (!xf_chunk(s_xp.lo[0], s_xp.hi[0], &s_xfc[0])) s_xp.fail = 1;
+          WaitForSingleObject(s_xp.done, INFINITE);
+          if (s_xp.fail) return;
+      } else if (!xf_chunk(0, n, &s_xfc[0])) {
+          return;                                        /* no program loaded */
+      }
+    if (_t0) g_p_xform_ns += xbox_HostNowNs() - _t0; }
     xf_set_viewport();
     {
         const VertexAttr *tc = texcoord_attr();
@@ -3065,7 +3694,9 @@ static void raster_batch_program(void)
     }
     /* The batch's triangles, all at once (see xf_queue_push). */
     xf_queue_flush();
-    if (backend_draws())
+    if (s_bex)
+        bex_flush();
+    else if (backend_draws())
         backend_flush(!s_xf_no_tex);
 }
 
@@ -3143,7 +3774,9 @@ static void raster_batch(void)
     default:
         break;                             /* points and lines: not yet */
     }
-    if (backend_draws())
+    if (s_bex)
+        bex_flush();
+    else if (backend_draws())
         backend_flush(textured);
 
     if (s_gpu.tris_drawn && (s_gpu.tris_drawn % 500) == 0)
@@ -3179,6 +3812,8 @@ static void frame_trace_flip(void)
         flag = getenv("RECOMP_FRAME_TRACE");
     if (!flag)
         return;
+    if (!s_swap_seen)          /* SG1: only real swaps delimit a frame */
+        return;
     if (s_ftrace == 3) {
         /* Deleting the flag file re-arms the trace for the next time it
          * appears, so one run can trace several moments. */
@@ -3204,7 +3839,10 @@ static void frame_trace_flip(void)
     }
 }
 
+static void draw_primitive_inner(void);
 static void draw_primitive(void)
+{ uint64_t _t0; if (!prof_on()) { draw_primitive_inner(); return; } _t0 = xbox_HostNowNs(); draw_primitive_inner(); g_p_draw_ns += xbox_HostNowNs() - _t0; g_p_draw_n++; }
+static void draw_primitive_inner(void)
 {
     float v[4];
     uint32_t i;
@@ -3744,7 +4382,11 @@ static void flip_hold_report(void)
     h->held_ns = 0;
 }
 
+uint64_t g_mh_ns[0x2000], g_mh_n[0x2000];
+static void nv2a_pb_exec_method_inner(uint32_t subch, uint32_t method, uint32_t param);
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
+{ uint64_t _t0, _d; if (!prof_on()) { nv2a_pb_exec_method_inner(subch, method, param); return; } _t0 = xbox_HostNowNs(); nv2a_pb_exec_method_inner(subch, method, param); _d = xbox_HostNowNs() - _t0; g_p_meth_ns += _d; g_p_meth_n++; { uint32_t _k = (method >> 2) & 0x1FFF; g_mh_ns[_k] += _d; g_mh_n[_k]++; } }
+static void nv2a_pb_exec_method_inner(uint32_t subch, uint32_t method, uint32_t param)
 {
     static int inited;
 
@@ -3754,6 +4396,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     if (subch == 0 && method == 0x1D70 && s_sem_va) {
         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
         *(volatile uint32_t *)(mem + s_sem_va) = param;
+        { volatile uint32_t *lr = xbox_Nv2aRegPtr(0x400B10);   /* SG1: keep latch fence bits in step */
+          if (lr) *lr = (*lr & ~0x7Cu) | ((param & 0x1Fu) << 2); }
         return;
     }
     if (!inited) {
@@ -3839,12 +4483,16 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      * enter it. So for a mirrored fence the latch carries the mirror's fence
      * bits and the marker's address, which is what a GPU that had consumed
      * everything would report. */
-    if (method == 0x0310 && subch == 5 && nv2a_pb_dma_walk()) {
+    if (method == 0x0310 && subch == 5) {
         volatile uint32_t *r = xbox_Nv2aRegPtr(0x400B10);
 
         if (!r)
             return;
-        if (!s_sem_va) {
+        if (s_sem_va) {
+            uint32_t sem = *(volatile uint32_t *)
+                           ((uint8_t *)xbox_GetMemoryOffset() + s_sem_va);
+            param = (param & ~0x7Cu) | ((sem & 0x1Fu) << 2);
+        } else if (!s_sem_va) {
             uint32_t va = xbox_Nv2aFenceWordVa();
 
             if (va) {
@@ -3853,6 +4501,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 param = (param & ~0x7Cu) | ((sem & 0x1Fu) << 2);
             }
         }
+        { static int n0; if (n0 < 40 || (n0 % 500) == 0) fprintf(stderr, "[M310] n=%d param=%08X s_sem_va=%08X fenceva=%08X\n", n0, param, s_sem_va, xbox_Nv2aFenceWordVa()); n0++; }
         *r = param;
         return;
     }
@@ -4026,6 +4675,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             s_gpu.idx[s_gpu.idx_count++] = param;
         break;
     case NV097_NO_OPERATION:
+        if (param) { s_dbg_nop = param; s_dbg_nop_n++; }
+        if ((param & 0x1Fu) == 1u) s_swap_seen = 1;
         /* Non-zero, it is one of D3D's software methods, which the GPU traps
          * to D3D's interrupt handler on the console. Only the swap's interval
          * matters here (nv2a_flip_hold.h); the rest stays a no-op. */
@@ -4055,6 +4706,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         return;
 
     case NV097_FLIP_INCREMENT_WRITE:
+        s_dbg_inc_n++;
         s_gpu.flip_write = s_gpu.flip_modulo
                          ? (s_gpu.flip_write + 1) % s_gpu.flip_modulo
                          : s_gpu.flip_write + 1;
@@ -4063,6 +4715,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         return;
 
     case NV097_FLIP_STALL: {
+        s_swap_real = s_swap_seen; s_swap_seen = 0;
         /* The flip is measured from the vblank the title swapped in (the
          * walk's start, s_walk_vbl); the hold's clock starts here, before
          * the present below: a vsynced present can hold this thread for a
@@ -4093,19 +4746,50 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         {
             extern void xbox_FramebufferWindowFrameStats(uint32_t);
             static uint32_t draws_at_flip;
+            if (getenv("RECOMP_FLIP_LOG")) {
+                extern uint64_t g_sg1_exec_ns; static uint64_t last_wall, last_exec;
+                uint64_t wall = xbox_HostNowNs();
+                fprintf(stderr, "[RTT] render_thread_busy_ms=%.1f executor_waited_ms=%.1f kicks=%llu between_kicks_ms=%.1f\n", g_rt_busy_ns / 1e6, g_rt_wait_ns / 1e6, (unsigned long long)g_sg1_kicks, g_sg1_gap_ns / 1e6); g_sg1_kicks = 0; g_sg1_gap_ns = 0;
+                { static unsigned nrep; if ((nrep++ % 30) == 29) sg1_thread_report(); } g_rt_busy_ns = g_rt_wait_ns = 0;
+                fprintf(stderr, "[TIMING2] meth_ms=%.1f meths=%llu draw_ms=%.1f draws=%llu bex_ms=%.1f\n", g_p_meth_ns/1e6, (unsigned long long)g_p_meth_n, g_p_draw_ns/1e6, (unsigned long long)g_p_draw_n, g_p_bex_ns/1e6);
+                { int r, k; for (r = 0; r < 6; r++) { int bk = -1; uint64_t bv = 0; for (k = 0; k < 0x2000; k++) if (g_mh_ns[k] > bv) { bv = g_mh_ns[k]; bk = k; }
+                    if (bk < 0) break; fprintf(stderr, "[MTOP] method %04X n=%llu ms=%.2f\n", bk << 2, (unsigned long long)g_mh_n[bk], bv / 1e6); g_mh_ns[bk] = 0; }
+                  memset(g_mh_ns, 0, sizeof g_mh_ns); memset(g_mh_n, 0, sizeof g_mh_n); }
+                g_p_meth_ns = g_p_meth_n = g_p_draw_ns = g_p_draw_n = g_p_bex_ns = 0;
+                fprintf(stderr, "[TIMING] wall_ms=%.1f exec_ms=%.1f batch_ms=%.1f xform_ms=%.1f rows_ms=%.1f rows_px=%llu tris=%llu\n", (wall - last_wall) / 1e6, (g_sg1_exec_ns - last_exec) / 1e6, g_p_batch_ns/1e6, g_p_xform_ns/1e6, g_p_rows_ns/1e6, (unsigned long long)g_p_rows_px, (unsigned long long)g_p_ntri);
+                g_p_batch_ns = g_p_xform_ns = g_p_rows_ns = g_p_rows_px = g_p_ntri = 0;
+                last_wall = wall; last_exec = g_sg1_exec_ns;
+                static int fl; if (fl++ < 3000)
+                    fprintf(stderr, "[FLIPLOG] flip %u draws=%u drawn_off=%08X color_off=%08X nop=%08X nops=%u incs=%u rd=%u wr=%u mod=%u\n",
+                            s_gpu.flips, (unsigned)(s_gpu.draws - draws_at_flip), s_gpu.drawn_offset, s_gpu.color_offset,
+                            s_dbg_nop, s_dbg_nop_n, s_dbg_inc_n, s_gpu.flip_read, s_gpu.flip_write, s_gpu.flip_modulo);
+                s_dbg_nop = 0; s_dbg_nop_n = 0; s_dbg_inc_n = 0;
+            }
             xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
             draws_at_flip = s_gpu.draws;
         }
-        if (s_gpu.pitch) {
+        if (s_gpu.pitch && (s_swap_real || getenv("RECOMP_PRESENT_ALL"))) {
             extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
             uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset
                                                : s_gpu.color_offset;
             uint32_t pitch = s_gpu.drawn_offset ? s_gpu.drawn_pitch
                                                 : s_gpu.pitch;
             if (done) {
+                if (s_rt_on) {
+                    rt_submit_present(dma_resolve(done), pitch,
+                                      s_gpu.drawn_offset ? s_gpu.drawn_bpp : surface_bpp(),
+                                      s_gpu.aa_sy > 1.5f ? 2u : 1u);
+                } else
+                { static uint64_t a_res, a_pres; static unsigned an; uint64_t t1 = xbox_HostNowNs(), t2, t3;
+                if (s_bex && s_bex->resolve)
+                    s_bex->resolve(dma_resolve(done), pitch,
+                                   s_gpu.drawn_offset ? s_gpu.drawn_bpp : surface_bpp());
+                t2 = xbox_HostNowNs();
                 xbox_FramebufferWindowSet(dma_resolve(done), pitch);
                 xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
                 xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
+                t3 = xbox_HostNowNs(); a_res += t2 - t1; a_pres += t3 - t2;
+                if (++an == 60) { if (getenv("RECOMP_FLIP_LOG")) fprintf(stderr, "[FLIPT] avg resolve_ms=%.2f present_ms=%.2f\n", a_res / 60e6, a_pres / 60e6); an = 0; a_res = a_pres = 0; } }
             }
         }
         {
@@ -4132,6 +4816,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         s_gpu.drawn_stale = 1;
         if (s_backend && s_backend->flip)
             s_backend->flip();
+        if (s_bex && s_bex->flip)
+            s_bex->flip();
 
         if (verbose) {
             static unsigned n;

@@ -117,4 +117,56 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 
+
+/* ---- Extended back end (SG1): full vertex attributes, four texture stages,
+ * register combiners, render targets that stay on the GPU. -------------------
+ *
+ * The executor still transforms vertices on the CPU (fixed function or vertex
+ * program) and clips at the near plane; the back end rasterises. Positions are
+ * in surface pixels with pos[3] = clip w (pos[2] = window z as the title made
+ * it). Colours are r,g,b,a floats. fog[0] is the per-vertex fog factor already
+ * run through the fog unit. tex[] are the raw s,t,r,q the program output. */
+typedef struct {
+    float pos[4];
+    float d0[4], d1[4];
+    float fog[4];
+    float tex[4][4];
+} Nv2aXfVertex;
+
+/* The raw SET_COMBINER_* words, same layout as Nv2aCombiner. */
+typedef struct {
+    uint32_t color_icw[8], alpha_icw[8];
+    uint32_t color_ocw[8], alpha_ocw[8];
+    uint32_t factor0[8], factor1[8];
+    uint32_t final0, final1;
+    uint32_t final_c0, final_c1;
+    uint32_t control;
+    uint32_t stage_program;               /* 5 bits per stage */
+} Nv2aRcWords;
+
+typedef struct {
+    const Nv2aXfVertex *vertices;         /* triangle list */
+    uint32_t            count;            /* multiple of 3 */
+    Nv2aTexture         tex[4];
+    uint32_t            tex_valid[4];
+    uint32_t            tex_texel_uv[4];  /* 1: s,t are in texels (linear formats) */
+    uint32_t            tex_border_on[4], tex_border[4];
+    Nv2aRcWords         rc;
+    uint32_t            use_rc;           /* 0: stage 0 texel * diffuse */
+    float               fog_color[4];     /* r,g,b,a */
+    const Nv2aRenderState *state;
+} Nv2aBatchEx;
+
+typedef struct {
+    void (*clear)(const Nv2aSurface *s, const Nv2aRenderState *rs,
+                  uint32_t flags, uint32_t argb, uint32_t zstencil);
+    void (*draw)(const Nv2aSurface *s, const Nv2aBatchEx *b);
+    /* Copy the render target at color_va into guest memory (bpp 2 or 4) so
+     * the framebuffer window can show it. Called at each presented flip. */
+    void (*resolve)(uint32_t color_va, uint32_t pitch, uint32_t bpp);
+    void (*flip)(void);
+} Nv2aBackendEx;
+
+void nv2a_backend_register_ex(const Nv2aBackendEx *backend);
+
 #endif /* NV2A_BACKEND_H */

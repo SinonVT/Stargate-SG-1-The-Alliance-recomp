@@ -37,3 +37,49 @@ bin/
 *.obj
 *.exe
 tools/split/output/
+# build output and runtime junk
+build/
+**/build/
+texdump/
+*.bak*
+*.log
+sample.txt
+perf*.txt
+sg1_settings.txt
+resolution.txt
+*.zip
+*.exe
+*.obj
+*.pdb
+*.map
+share_patch/
+
+# game data - never publish
+*.xbe
+*.xbx
+System/
+
+# generated from the game binary: uncomment to keep it out of the repo
+sg1_alliance/src/recomp/gen/
+
+# my patch scripts and scratch
+p_*.py
+gs*.txt
+zis*
+
+# logs, dumps and test output
+console*.txt
+tex*.txt
+perf*.txt
+*.txt.*
+!**/CMakeLists.txt
+!**/LICENSES/*.txt
+audio_test.wav
+*.wav
+pickdump/
+**/pickdump/
+**/texdump/
+__pycache__/
+*.pyc
+sample.txt
+sg1_alliance/src/recomp/gen_old_text_only/

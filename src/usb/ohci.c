@@ -1090,7 +1090,7 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
         /* Operational is HCFS == 10b in bits 7:6. Interrupting a controller
          * the driver has not started yet is not a test of anything. */
         if ((control & 0xC0u) != 0x80u) {
-            if (++waited > 1500)              /* 30 s and it never started */
+            if (++waited > 60000)            /* 30 s and it never started */
                 break;
             continue;
         }

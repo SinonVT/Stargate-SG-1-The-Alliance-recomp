@@ -63,6 +63,14 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  * thread is never reading the one being filled. */
 static uint32_t     *s_present[2];
 static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
+/* SG1: full-resolution copy of the same frame, when the renderer runs above 640x480. The renderer
+ * installs the hook (d3d11_backend.c); 0 from it means "use the normal frame". */
+int (*xbox_fb_hires_hook)(uint32_t va, const uint32_t **pix, uint32_t *w, uint32_t *h);
+static uint32_t     *s_hi[2];
+static uint32_t      s_hi_w[2], s_hi_h[2];
+static size_t        s_hi_cap[2];
+static uint32_t     *s_hi_show;            /* window thread's copy */
+static size_t        s_hi_show_cap;
 
 /* The last PVIDEO frame shown. A frame stays on screen until the next one or
  * STOP, but once its bank is consumed the title may reuse the memory, so the
@@ -74,12 +82,14 @@ static uint32_t      s_pvideo_regs[0x1000 / 4];
 
 /* Draw the video overlay over s_rgb: a newly submitted bank if there is one
  * (copied, drawn, then handed back to the title), else the last frame. */
+static int s_ov_active;      /* the video overlay drew into s_rgb this frame */
 static void fb_overlay(void)
 {
     uint32_t regs[0x1000 / 4];
     unsigned bank;
     bool presented = false;
 
+    s_ov_active = 0;
     if (!s_rgb || !nv2a_hook_pvideo_snapshot(regs)) return;
     if ((regs[NV_PVIDEO_STOP / 4] & 1u) ||
         (s_pvideo_source &&
@@ -120,12 +130,14 @@ static void fb_overlay(void)
         s_pvideo_bytes = (size_t)bytes;
         s_pvideo_bank = bank;
         memcpy(s_pvideo_regs, regs, sizeof(s_pvideo_regs));
-        presented = true;
+        presented = true; s_ov_active = 1;
         nv2a_hook_pvideo_consume(bank);
     }
-    if (!presented && s_pvideo_source)
+    if (!presented && s_pvideo_source) {
+        s_ov_active = 1;
         pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
                        s_fb_width, s_fb_height, s_pvideo_bank);
+    }
 }
 
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
@@ -158,6 +170,9 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     LONG next;
     uint32_t bpp, x, y;
 
+    {   extern int mkb_name_busy(void);
+        if (mkb_name_busy()) return;       /* hide the console while the name is typed */
+    }
     if (!s_fb_running || !fb_va || !pitch)
         return;
     if (getenv("RECOMP_FB_VA"))
@@ -196,6 +211,19 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
             memset(dst, 0, (size_t)s_fb_width * 4);
         }
     }
+    s_hi_w[next] = 0;
+    if (xbox_fb_hires_hook) {
+        const uint32_t *hp; uint32_t hw, hh;
+        if (xbox_fb_hires_hook(fb_va, &hp, &hw, &hh) && hw && hh) {
+            size_t need = (size_t)hw * hh;
+            if (s_hi_cap[next] < need) {
+                free(s_hi[next]);
+                s_hi[next] = (uint32_t *)malloc(need * 4);
+                s_hi_cap[next] = s_hi[next] ? need : 0;
+            }
+            if (s_hi[next]) { memcpy(s_hi[next], hp, need * 4); s_hi_w[next] = hw; s_hi_h[next] = hh; }
+        }
+    }
     /* Published only once it is whole. */
     InterlockedExchange(&s_present_idx, next);
 }
@@ -216,10 +244,137 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
         s_title[i] = 0;
 }
 
+/* SG1: short note shown in the title bar (current render resolution) */
+static wchar_t       s_note[64];
+static volatile LONG s_note_dirty;
+void xbox_FramebufferWindowSetNote(const char *text)
+{
+    int i;
+    for (i = 0; text && text[i] && i < 63; i++) s_note[i] = (wchar_t)(unsigned char)text[i];
+    s_note[i] = 0;
+    InterlockedExchange(&s_note_dirty, 1);
+}
+
 void xbox_FramebufferWindowFrameStats(uint32_t draws)
 {
     InterlockedIncrement(&s_flips);
     InterlockedExchange(&s_frame_draws, (LONG)draws);
+}
+
+
+/* ---- SG1: in-game settings overlay (Insert) ---------------------------------------------------
+ * Drawn with GDI into a private DIB and composited onto the copy of the frame the window shows, so it
+ * works for both the 640x480 and the high-resolution path. Keyboard only: Up/Down select, Left/Right
+ * change, Insert or Esc close. While it is open mkb_input gives the game no keyboard or mouse. */
+extern volatile LONG g_sg1_menu_open;
+extern float mkb_scale_get(void);
+extern void mkb_scale_mul(float f);
+extern int g_mkb_invert_y;
+extern void mkb_invert_y_toggle(void);
+/* backend (d3d11_backend.c) items: resolution, anisotropy, mipmaps */
+int g_sg1_bm_count;
+void (*g_sg1_bm_text)(int item, char *buf, int n);
+void (*g_sg1_bm_change)(int item, int dir);
+
+static int s_mn_sel;
+
+static int mn_key_edge(int vk, int *prev)
+{
+    int d = (GetAsyncKeyState(vk) & 0x8000) != 0, e = d && !*prev;
+    *prev = d;
+    return e;
+}
+
+static int mn_items(void) { return 2 + g_sg1_bm_count; }
+
+static void mn_text(int i, char *b, int n)
+{
+    if (i == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
+    else if (i == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
+    else if (g_sg1_bm_text) g_sg1_bm_text(i - 2, b, n);
+    else b[0] = 0;
+}
+
+static void mn_change(int i, int dir)
+{
+    if (i == 0) mkb_scale_mul(dir > 0 ? 1.25f : 1.0f / 1.25f);
+    else if (i == 1) mkb_invert_y_toggle();
+    else if (g_sg1_bm_change) g_sg1_bm_change(i - 2, dir);
+}
+
+static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
+{
+    static int p_ins, p_esc, p_up, p_dn, p_lt, p_rt;
+    int open = (int)g_sg1_menu_open;
+    int fg = GetForegroundWindow() == hwnd;
+    int ins = mn_key_edge(VK_INSERT, &p_ins), esc = mn_key_edge(VK_ESCAPE, &p_esc);
+    int up = mn_key_edge(VK_UP, &p_up), dn = mn_key_edge(VK_DOWN, &p_dn);
+    int lt = mn_key_edge(VK_LEFT, &p_lt), rt = mn_key_edge(VK_RIGHT, &p_rt);
+    int ret = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    static int p_ret;
+    int rete = ret && !p_ret;
+    p_ret = ret;
+    if (!fg) return;
+    if (ins || (open && esc)) { open = !open; g_sg1_menu_open = open; if (open) s_mn_sel = 0; }
+    if (!open || !px || w < 160 || h < 120) return;
+    {
+        int n = mn_items(), r;
+        if (up) s_mn_sel = (s_mn_sel + n - 1) % n;
+        if (dn) s_mn_sel = (s_mn_sel + 1) % n;
+        if (lt) mn_change(s_mn_sel, -1);
+        if (rt || rete) mn_change(s_mn_sel, +1);
+        {
+            int fpx = (int)h / 28; if (fpx < 14) fpx = 14; if (fpx > 40) fpx = 40;
+            int pw = fpx * 22, ph = fpx * (n + 4), x0 = fpx, y0 = fpx, x, y;
+            BITMAPINFO bi; void *bits = NULL; HBITMAP bmp; HDC dc; HFONT fnt, old; RECT rc; uint32_t *dib;
+            if (pw > (int)w - 2 * x0) pw = (int)w - 2 * x0;
+            if (ph > (int)h - 2 * y0) ph = (int)h - 2 * y0;
+            if (pw < 100 || ph < 60) return;
+            memset(&bi, 0, sizeof bi);
+            bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = pw; bi.bmiHeader.biHeight = -ph;
+            bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+            dc = CreateCompatibleDC(NULL);
+            bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+            if (!dc || !bmp || !bits) { if (bmp) DeleteObject(bmp); if (dc) DeleteDC(dc); return; }
+            SelectObject(dc, bmp);
+            memset(bits, 0, (size_t)pw * ph * 4);
+            fnt = CreateFontA(-fpx * 3 / 4, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                              CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+            old = (HFONT)SelectObject(dc, fnt);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(255, 255, 255));
+            TextOutA(dc, fpx / 2, fpx / 3, "SETTINGS  (Insert closes)", 25);
+            for (r = 0; r < n; r++) {
+                char line[96];
+                int ty = fpx * (r + 2);
+                mn_text(r, line, sizeof line);
+                if (r == s_mn_sel) {
+                    HBRUSH hb = CreateSolidBrush(RGB(40, 70, 170));
+                    rc.left = 4; rc.right = pw - 4; rc.top = ty - 2; rc.bottom = ty + fpx;
+                    FillRect(dc, &rc, hb); DeleteObject(hb);
+                    SetTextColor(dc, RGB(255, 255, 120));
+                } else SetTextColor(dc, RGB(235, 235, 235));
+                TextOutA(dc, fpx / 2, ty, line, (int)strlen(line));
+            }
+            SetTextColor(dc, RGB(150, 150, 150));
+            { const char *hl = "Up/Down select  Left/Right change"; TextOutA(dc, fpx / 2, fpx * (n + 2) + fpx / 3, hl, (int)strlen(hl)); }
+            SelectObject(dc, old); DeleteObject(fnt);
+            GdiFlush();
+            dib = (uint32_t *)bits;
+            for (y = 0; y < ph; y++) {
+                uint32_t *dst = px + (size_t)(y0 + y) * w + x0;
+                const uint32_t *src = dib + (size_t)y * pw;
+                for (x = 0; x < pw; x++) {
+                    uint32_t d = src[x] & 0xFFFFFF, f = dst[x];
+                    uint32_t fr = (((f >> 16) & 255) * 90) >> 8, fgc = (((f >> 8) & 255) * 90) >> 8, fb = ((f & 255) * 90) >> 8;
+                    uint32_t rr = fr + ((d >> 16) & 255), gg = fgc + ((d >> 8) & 255), bb = fb + (d & 255);
+                    if (rr > 255) rr = 255; if (gg > 255) gg = 255; if (bb > 255) bb = 255;
+                    dst[x] = 0xFF000000u | (rr << 16) | (gg << 8) | bb;
+                }
+            }
+            DeleteObject(bmp); DeleteDC(dc);
+        }
+    }
 }
 
 /* Alt+Enter / F11: borderless fullscreen on the window's monitor, and back.
@@ -261,6 +416,10 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     if (m == WM_SYSKEYDOWN && w == VK_RETURN)
         return 0;                       /* auto-repeat of Alt+Enter */
+    if (m == WM_SETCURSOR && LOWORD(l) == HTCLIENT) {   /* SG1: no Windows arrow while the game owns the mouse */
+        extern int mkb_capturing(void);
+        if (mkb_capturing()) { SetCursor(NULL); return TRUE; }
+    }
     switch (m) {
     case WM_CLOSE:
     case WM_DESTROY:
@@ -467,8 +626,31 @@ static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
 static int fb_show(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
 {
     if (gpu_present_active())
-        return gpu_present_frame(s_rgb);
+        return gpu_present_frame_sized(s_rgb, s_fb_width, s_fb_height);
     gdi_blit(hwnd, hdc, bi);
+    return 0;
+}
+
+static int fb_show_hi(HWND hwnd, HDC hdc, const uint32_t *px, uint32_t w, uint32_t h)
+{
+    if (gpu_present_active())
+        return gpu_present_frame_sized(px, w, h);
+    {
+        BITMAPINFO b2;
+        RECT c; LONG cw, ch, dw, dh;
+        memset(&b2, 0, sizeof b2);
+        b2.bmiHeader.biSize = sizeof(b2.bmiHeader);
+        b2.bmiHeader.biWidth = (LONG)w; b2.bmiHeader.biHeight = -(LONG)h;
+        b2.bmiHeader.biPlanes = 1; b2.bmiHeader.biBitCount = 32; b2.bmiHeader.biCompression = BI_RGB;
+        GetClientRect(hwnd, &c);
+        cw = c.right - c.left; ch = c.bottom - c.top;
+        if (cw <= 0 || ch <= 0) return 0;
+        if ((long long)cw * h <= (long long)ch * w) { dw = cw; dh = (LONG)((long long)cw * h / w); }
+        else { dh = ch; dw = (LONG)((long long)ch * w / h); }
+        SetStretchBltMode(hdc, HALFTONE);
+        SetBrushOrgEx(hdc, 0, 0, NULL);
+        StretchDIBits(hdc, (cw - dw) / 2, (ch - dh) / 2, dw, dh, 0, 0, (int)w, (int)h, px, &b2, DIB_RGB_COLORS, SRCCOPY);
+    }
     return 0;
 }
 
@@ -563,7 +745,22 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                        (size_t)s_fb_width * s_fb_height * 4);
             if (!fb_pinned)
                 fb_overlay();
+            {   /* SG1: full-resolution frame when there is one and no video is playing */
+                uint32_t hw = s_hi_w[idx], hh = s_hi_h[idx];
+                if (hw && hh && !s_ov_active && s_hi[idx]) {
+                    size_t need = (size_t)hw * hh;
+                    if (s_hi_show_cap < need) { free(s_hi_show); s_hi_show = (uint32_t *)malloc(need * 4); s_hi_show_cap = s_hi_show ? need : 0; }
+                    if (s_hi_show) {
+                        memcpy(s_hi_show, s_hi[idx], need * 4);
+                        sg1_menu_frame(hwnd, s_hi_show, hw, hh);
+                        paced = fb_show_hi(hwnd, hdc, s_hi_show, hw, hh);
+                        goto shown;
+                    }
+                }
+            }
+            sg1_menu_frame(hwnd, s_rgb, s_fb_width, s_fb_height);
             paced = fb_show(hwnd, hdc, &bi);
+            shown: ;
         } else if (s_fb_va && s_fb_pitch && s_rgb) {
             /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
              * before, which is also what a title that never flips needs. */
@@ -572,6 +769,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
             fb_convert(src, s_fb_pitch / s_fb_width);
             if (!fb_pinned)
                 fb_overlay();
+            sg1_menu_frame(hwnd, s_rgb, s_fb_width, s_fb_height);
             paced = fb_show(hwnd, hdc, &bi);
         }
         {
@@ -601,11 +799,11 @@ static DWORD WINAPI fb_thread(LPVOID unused)
             static DWORD t0;
             static LONG f0;
             DWORD now = GetTickCount();
-            if (now - t0 >= 1000) {
+            if (now - t0 >= 1000 || InterlockedExchange(&s_note_dirty, 0)) {
                 LONG f = s_flips;
                 wchar_t tb[128];
-                _snwprintf(tb, 127, L"%ls | FPS: %.1f | draws: %ld", s_title,
-                           t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0,
+                _snwprintf(tb, 127, L"%ls | %ls | FPS: %.1f | draws: %ld", s_title, s_note,
+                           (t0 && now > t0) ? (f - f0) * 1000.0 / (now - t0) : 0.0,
                            (long)s_frame_draws);
                 tb[127] = 0;
                 SetWindowTextW(hwnd, tb);

@@ -1274,7 +1274,7 @@ uint32_t xbox_Nv2aFenceWordVa(void)
             continue;
         get_ptr = *(volatile uint32_t *)((uintptr_t)(dev + g_fence_mirrors[i].get_ptr_off)
                                          + g_memory_offset);
-        if (get_ptr >= 0x80000000u && get_ptr - 0x80000000u <= 0x04000000u - 4u
+        if (get_ptr >= 0x80000000u && get_ptr - 0x80000000u <= XBOX_CONTIG_SIZE - 4u
                 && !(get_ptr & 3u) && fence_readable(get_ptr, 4))
             return get_ptr;
     }
@@ -1390,6 +1390,22 @@ static void framebuffer_probe_tick(void)
  * and a level load, thousands of kickoffs long, looked frozen. Clearing them
  * from inside the walk answers the kickoff within a few hundred commands,
  * without a thread of its own spinning on a host core. */
+/* SG1: the title's D3D kickoff sets PFB flush (0x100410 bit 16) and spins until it clears. It used to
+ * wait for this thread to get round to it, which is after the pushbuffer segment just submitted has been
+ * executed, so the game could not run while the GPU emulation did. The recompiled kickoff now clears the
+ * bit itself. RECOMP_KICK_WAIT=1 restores the old wait; pacing a flip (RECOMP_FLIP_PACING) needs it too. */
+int sg1_kick_instant(void)
+{
+    /* OFF by default: with it on the game ran ahead of the executor and overwrote vertex and texture
+     * data the executor had not read yet (flashing UI, corrupted vertices). RECOMP_KICK_INSTANT=1 opts in. */
+    static int v = -1;
+    if (v < 0) {
+        const char *w = getenv("RECOMP_KICK_INSTANT"), *p = getenv("RECOMP_FLIP_PACING");
+        v = (w && w[0] == '1') && !(p && p[0] && strcmp(p, "0"));
+    }
+    return v;
+}
+
 static void nv2a_ack_busy_bits(int flip_held)
 {
     volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
@@ -1550,18 +1566,29 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                         static uint32_t put_lo, put_hi;
                         if (!put_lo || put < put_lo) put_lo = put;
                         if (put > put_hi) put_hi = put;
-                        if (last_put && put > last_put) {
-                            nv2a_pb_scan_segment(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
-                                                 XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu));
-                        } else if (last_put && put < last_put) {
-                            if (put_hi > last_put)
-                                nv2a_pb_scan_segment(
-                                    XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
-                                    XBOX_CONTIG_BASE | (put_hi   & 0x0FFFFFFFu));
-                            if (put > put_lo)
-                                nv2a_pb_scan_segment(
-                                    XBOX_CONTIG_BASE | (put_lo & 0x0FFFFFFFu),
-                                    XBOX_CONTIG_BASE | (put    & 0x0FFFFFFFu));
+                        if (last_put && put != last_put) {
+                            extern void nv2a_pb_scan_ring(uint32_t, uint32_t, uint32_t, uint32_t);
+                            extern uint64_t xbox_HostNowNs(void);
+                            extern volatile uint64_t g_sg1_gap_ns, g_sg1_kicks;
+                            static uint64_t last_end;
+                            uint64_t t_in = xbox_HostNowNs();
+                            if (last_end) g_sg1_gap_ns += t_in - last_end;
+                            g_sg1_kicks++;
+                            {   /* SG1 experiment: RECOMP_EARLY_GET=1 tells the title the segment is consumed
+                                 * before it has been executed, to see whether the game waits on GET. The
+                                 * ring may be overwritten while it is read; off by default. */
+                                static int early = -1;
+                                if (early < 0) early = getenv("RECOMP_EARLY_GET") != NULL;
+                                if (early) {
+                                    *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET) = put;
+                                    get_written = put;
+                                }
+                            }
+                            nv2a_pb_scan_ring(XBOX_CONTIG_BASE | (last_put & 0x0FFFFFFFu),
+                                              XBOX_CONTIG_BASE | (put      & 0x0FFFFFFFu),
+                                              XBOX_CONTIG_BASE | (put_hi   & 0x0FFFFFFFu),
+                                              XBOX_CONTIG_BASE | (put_lo   & 0x0FFFFFFFu));
+                            last_end = xbox_HostNowNs();
                         }
                     }
                     /* Periodic, because what the title submits at init is not
@@ -1928,6 +1955,12 @@ static int watch_is_code(uint32_t va)
     return va >= g_xbox_code_lo && va < g_xbox_code_hi;
 }
 
+#if defined(_WIN32)
+/* LOCAL PATCH (sg1 bring-up): host RIP of the writer, symbolised by main.c. */
+extern void recomp_watch_sym_dump(void *rip);
+static void *s_watch_rip;
+#endif
+
 static void watch_report(void)
 {
     const uint8_t *mem = (const uint8_t *)g_memory_offset;
@@ -1939,6 +1972,9 @@ static void watch_report(void)
     fprintf(stderr, "[WATCH] [%08X] %08X -> %08X  (esp=%08X)\n",
             g_watch_va, g_watch_last, now, esp);
     g_watch_last = now;
+#if defined(_WIN32)
+    recomp_watch_sym_dump(s_watch_rip);
+#endif
 
     /* Return addresses the recompiled code pushed, innermost first. Values
      * that merely look like code get printed too -- the chain is a lead, not
@@ -1983,6 +2019,9 @@ static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
 
     if (code == EXCEPTION_SINGLE_STEP && s_watch_stepping) {
         s_watch_stepping = 0;
+#if defined(_WIN32)
+        s_watch_rip = (void *)ep->ContextRecord->Rip;
+#endif
         watch_report();
         VirtualProtect(g_watch_page, 4096, PAGE_READONLY, &old);
         ep->ContextRecord->EFlags &= ~0x100u;
@@ -2431,6 +2470,12 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
                 WD_NV2A(NV2A_PFIFO_DMA_PUT), WD_NV2A(NV2A_PFIFO_DMA_GET),
                 WD_NV2A(NV2A_PFIFO_REF), WD_NV2A(NV2A_PFIFO_DMA_SUBROUTINE));
 #undef WD_NV2A
+        {
+          uint32_t dv = *(const uint32_t *)(mem + 0x00460EE8u);
+          uint32_t sv = (dv >= 0x10000u && dv < 0x04000000u) ? *(const uint32_t *)(mem + dv + 0x30u) : 0;
+          uint32_t sw = (sv >= 0x80000000u && sv < 0x88000000u) ? *(volatile uint32_t *)((uint8_t *)(uintptr_t)xbox_GetMemoryOffset() + sv) : 0xDEAD;
+          fprintf(stderr, "  [SG1WD] PGRAPH400B10=%08X semVA=%08X semWord=%08X FenceWordVa=%08X\n",
+                  *(const volatile uint32_t *)(r + 0x400B10), sv, sw, xbox_Nv2aFenceWordVa()); }
     }
 
     for (i = 0; i < 400 && esp; i++) {

@@ -1,0 +1,26 @@
+--- sg1_alliance/src/recomp/gen/recomp_0109.c.bak_kick	2026-10-20 21:02:49.787945300 +0000
++++ sg1_alliance/src/recomp/gen/recomp_0109.c	2026-10-20 21:02:50.082945200 +0000
+@@ -1682,6 +1682,7 @@
+     ecx = ecx | 0x10000;
+     _fa = (uint32_t)(ecx) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* or result */
+     MEM32(eax + 0x100410) = ecx;
++    { extern int sg1_kick_instant(void); if (sg1_kick_instant()) MEM32(eax + 0x100410) = ecx & ~0x10000u; } /* SG1: kickoff flush completes at once */
+ 
+ loc_00457A30: ;
+     _fa = (uint32_t)(MEM32(eax + 0x100410)) & 0xFFFFFFFFu; _fb = (uint32_t)(0x10000) & 0xFFFFFFFFu;
+@@ -1735,6 +1736,7 @@
+     ecx = ecx | 0x10000;
+     _fa = (uint32_t)(ecx) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* or result */
+     MEM32(eax + 0x100410) = ecx;
++    { extern int sg1_kick_instant(void); if (sg1_kick_instant()) MEM32(eax + 0x100410) = ecx & ~0x10000u; } /* SG1: kickoff flush completes at once */
+     /* nop */
+ 
+ loc_00457A80: ;
+@@ -1834,6 +1836,7 @@
+     edx = edx | 0x10000;
+     _fa = (uint32_t)(edx) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* or result */
+     MEM32(eax + 0x100410) = edx;
++    { extern int sg1_kick_instant(void); if (sg1_kick_instant()) MEM32(eax + 0x100410) = edx & ~0x10000u; } /* SG1: kickoff flush completes at once */
+     goto loc_00457B30;
+ 
+     /* nop */

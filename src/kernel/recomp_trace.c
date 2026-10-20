@@ -1,3 +1,4 @@
+#include <string.h>
 /**
  * Function tracing for recompiled code.
  *
@@ -268,4 +269,27 @@ void recomp_debug_service(uint32_t service, uint32_t arg_va)
     if (length && ((const char *)(mem + buffer_va))[length - 1] != '\n')
         fputc('\n', stderr);
     fflush(stderr);
+    {   /* SG1: follow the selected profile into the match (see mkb_set_profile) */
+        extern void mkb_set_profile(const char *); extern void mkb_arm_name(int);
+        char ln[200]; int ll = length < 199 ? length : 199; const char *q;
+        memcpy(ln, mem + buffer_va, ll); ln[ll] = 0;
+        q = strstr(ln, "Setting Profile to ");
+        if (q) mkb_set_profile(q + 19);
+        else if (strstr(ln, "PostLogin:") && !strstr(ln, "MainMenu.") && !strstr(ln, "Entry.")) mkb_arm_name(-4000);
+        else if (strstr(ln, "Init: LoadMap:") && !strstr(ln, "LoadMap: mainmenu") && !strstr(ln, "LoadMap: Entry")) mkb_arm_name(15000);
+    }
+    /* SG1: dump the guest stack when the engine reports a failed assertion */
+    {
+        char tmp[256]; int n = length < 255 ? length : 255; int k;
+        memcpy(tmp, mem + buffer_va, n); tmp[n] = 0;
+        if (strstr(tmp, "Assertion failed") || strstr(tmp, "Critical")) {
+            fprintf(stderr, "  [ASSERT] guest esp=0x%08X:\n", g_esp);
+            for (k = 0; k < 7000; k++) {
+                uint32_t a2 = g_esp + k * 4;
+                if (a2 < 0x00010000u || a2 >= 0x08000000u) break;
+                fprintf(stderr, "    GS %08X %08X\n", a2, *(const uint32_t *)(mem + a2));
+            }
+            fflush(stderr);
+        }
+    }
 }

@@ -1,3 +1,4 @@
+#include <stdio.h>
 /**
  * Xbox Input Compatibility Layer
  *
@@ -28,13 +29,20 @@
  * Merging is also the better rule. A real pad keeps working -- its
  * buttons are already in pState and the keyboard only adds to them --
  * and there is no special case left to get wrong. */
+extern int mkb_text_mode(void);
+extern int mkb_key_blocked(int vk);
 static void keyboard_merge(XBOX_INPUT_STATE *pState)
 {
     XBOX_INPUT_STATE kb;
     int i;
 
+    if (mkb_text_mode())
+        return;
     if (!xbox_InputKeyboardPoll(&kb))
         return;
+    if (mkb_key_blocked(0x0D) || mkb_key_blocked(0x1B))
+        kb.Gamepad.wButtons &= ~XBOX_GAMEPAD_START;
+    { static int pv2; int st = (kb.Gamepad.wButtons & XBOX_GAMEPAD_START) != 0; if (st && !pv2) fprintf(stderr, "[STARTDBG] keyboard_merge start edge\n"); pv2 = st; }
     pState->Gamepad.wButtons |= kb.Gamepad.wButtons;
     for (i = 0; i < 8; i++)
         if (kb.Gamepad.bAnalogButtons[i] > pState->Gamepad.bAnalogButtons[i])
@@ -88,6 +96,11 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
             int kb;
             memset(pState, 0, sizeof *pState);
             kb = xbox_InputKeyboardPoll(pState);
+            if (kb && mkb_text_mode())   /* menus and chat get arrows as real key events; keep the pad from adding them a second time */
+                pState->Gamepad.wButtons &= ~(XBOX_GAMEPAD_DPAD_UP | XBOX_GAMEPAD_DPAD_DOWN | XBOX_GAMEPAD_DPAD_LEFT | XBOX_GAMEPAD_DPAD_RIGHT);
+            if (kb && (mkb_key_blocked(0x0D) || mkb_key_blocked(0x1B)))
+                pState->Gamepad.wButtons &= ~XBOX_GAMEPAD_START;
+            { static int pv; int st = (pState->Gamepad.wButtons & XBOX_GAMEPAD_START) != 0; if (st && !pv) fprintf(stderr, "[STARTDBG] kb start edge (txt=%d)\n", mkb_text_mode()); pv = st; }
             if (mkb_merge(dwPort, pState))
                 g_controller_connected[dwPort] = TRUE;
             if (kb || mkb_enabled())

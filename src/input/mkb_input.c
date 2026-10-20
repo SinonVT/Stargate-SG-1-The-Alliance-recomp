@@ -37,6 +37,8 @@
 #include <string.h>
 #include <math.h>
 
+extern volatile LONG g_sg1_menu_open;   /* SG1: in-game settings overlay is open */
+
 /* ---- configuration ----------------------------------------------------- */
 
 typedef struct {
@@ -134,7 +136,10 @@ static void mkb_load_config(void)
  * InterlockedExchange is the whole protocol: the input thread adds
  * with InterlockedAdd, the poll takes everything with Exchange(0). */
 static volatile LONG s_dx, s_dy;
+static volatile LONG s_raw_events, s_abs_events;
 static volatile LONG s_wheel;        /* wheel steps since last poll   */
+static volatile LONG s_gdx, s_gdy;   /* gameplay (native mouse-look) copy */
+static volatile LONG s_mdx, s_mdy, s_mlvl, s_mrlvl;   /* menu-side copy, never cleared by aim */
 static volatile LONG s_mouse_btn;    /* 1 L, 2 R, 4 M, 8 X1, 16 X2    */
 static volatile unsigned char s_vk_down[256];
 
@@ -144,6 +149,43 @@ static volatile LONG s_thread_up;
 /* F9 is read on the input thread, so the toggle works even while the
  * game is stalled on the poll side. */
 #define MKB_TOGGLE_VK  VK_F9
+
+
+/* ---- real keyboard events for the game (typing, console) ---- */
+static volatile LONG s_console_typing, s_con_tick;
+typedef struct { unsigned short vk; unsigned char down, rep; unsigned short ch; } KbEvt;
+static KbEvt s_kq[256];
+static volatile LONG s_kq_w, s_kq_r;
+static void kq_push(unsigned vk, int down, int rep, unsigned ch)
+{
+    LONG w = s_kq_w;
+    if (w - s_kq_r >= 256) return;
+    s_kq[w & 255].vk = (unsigned short)vk; s_kq[w & 255].down = (unsigned char)down;
+    s_kq[w & 255].rep = (unsigned char)rep; s_kq[w & 255].ch = (unsigned short)ch;
+    MemoryBarrier();
+    s_kq_w = w + 1;
+    if (s_console_typing) s_con_tick = (LONG)GetTickCount();
+}
+
+/* Text mode: while a menu is on screen (the game draws it every frame and tells us)
+ * or the console is open for typing, letters must reach the game as letters, not
+ * as pad buttons -- so the keyboard-as-pad layers stand down. */
+static volatile LONG s_menu_tick;
+static volatile int mkb_txt;
+static int s_startdbg;
+void mkb_note_menu(void) { s_menu_tick = (LONG)GetTickCount(); }
+static volatile LONG s_blk[256];
+void mkb_set_console(int on) { s_console_typing = on ? 1 : 0; s_con_tick = (LONG)GetTickCount(); if (!on) { s_blk[0x0D] = 1; s_blk[0x1B] = 1; } }
+int mkb_key_blocked(int vk) { return (unsigned)vk < 256 && s_blk[vk]; }
+int mkb_text_mode(void)
+{
+    static int last = -1;
+    int menu = s_menu_tick && (LONG)GetTickCount() - s_menu_tick < 250;
+    if (s_console_typing && (LONG)GetTickCount() - s_con_tick > 15000) s_console_typing = 0;   /* failsafe: chat/console never opened */
+    int m = (menu || s_console_typing) ? 1 : 0;
+    if (m != last) { last = m; fprintf(stderr, "  [MKB] text mode %s (menu=%d console=%d)\n", m ? "on: keyboard->pad off" : "off: keyboard->pad on", menu, (int)s_console_typing); fflush(stderr); }
+    return m;
+}
 
 static void mkb_handle_raw(HRAWINPUT h)
 {
@@ -158,9 +200,30 @@ static void mkb_handle_raw(HRAWINPUT h)
     if (ri->header.dwType == RIM_TYPEMOUSE) {
         const RAWMOUSE *m = &ri->data.mouse;
 
+        s_raw_events++;
+        if (!(m->usFlags & MOUSE_MOVE_ABSOLUTE)) { if (m->lLastX) { InterlockedAdd(&s_mdx, m->lLastX); InterlockedAdd(&s_gdx, m->lLastX); } if (m->lLastY) { InterlockedAdd(&s_mdy, m->lLastY); InterlockedAdd(&s_gdy, m->lLastY); } }
+        if (m->usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) InterlockedExchange(&s_mlvl, 1);
+        if (m->usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)   InterlockedExchange(&s_mlvl, 0);
+        if (m->usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN) InterlockedExchange(&s_mrlvl, 1);
+        if (m->usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)   InterlockedExchange(&s_mrlvl, 0);
         if (!(m->usFlags & MOUSE_MOVE_ABSOLUTE)) {
             if (m->lLastX) InterlockedAdd(&s_dx, m->lLastX);
             if (m->lLastY) InterlockedAdd(&s_dy, m->lLastY);
+        } else {
+            /* SG1: remote desktop, VM and tablet mice report absolute
+             * positions (0..65535); turn the change into relative counts. */
+            static LONG ax = -1, ay = -1;
+            s_abs_events++;
+            if (ax >= 0) {
+                int w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
+                LONG ddx = (LONG)((m->lLastX - ax) * (long long)w / 65535);
+                LONG ddy = (LONG)((m->lLastY - ay) * (long long)h / 65535);
+                if (ddx) InterlockedAdd(&s_dx, ddx);
+                if (ddx) { InterlockedAdd(&s_mdx, ddx); InterlockedAdd(&s_gdx, ddx); }
+                if (ddy) { InterlockedAdd(&s_mdy, ddy); InterlockedAdd(&s_gdy, ddy); }
+                if (ddy) InterlockedAdd(&s_dy, ddy);
+            }
+            ax = m->lLastX; ay = m->lLastY;
         }
         if (m->usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
             InterlockedOr(&s_mouse_btn, 1);
@@ -198,6 +261,20 @@ static void mkb_handle_raw(HRAWINPUT h)
                                                     : "released (F9)");
                 fflush(stderr);
             }
+        }
+        if (vk && vk < 256 && s_active && vk != MKB_TOGGLE_VK) {
+            int dn = (k->Message == WM_KEYDOWN || k->Message == WM_SYSKEYDOWN);
+            unsigned ch = 0;
+            int rep = dn && s_vk_down[vk];
+            if (dn && !s_vk_down[0x11]) {
+                BYTE ks[256]; WCHAR wb[4];
+                memset(ks, 0, sizeof ks);
+                if (s_vk_down[0x10]) ks[VK_SHIFT] = 0x80;
+                if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] = 1;
+                if (ToUnicode(vk, k->MakeCode, ks, wb, 4, 4) == 1 && wb[0] >= 0x20 && wb[0] < 0x7F)
+                    ch = wb[0];
+            }
+            kq_push(vk, dn, rep, ch);
         }
         if (vk && vk < 256) {
             if (k->Message == WM_KEYDOWN || k->Message == WM_SYSKEYDOWN)
@@ -281,6 +358,7 @@ int mkb_enabled(void)
         const char *v = getenv("RECOMP_MKB");
         on = v && *v && *v != '0';
         if (on) {
+            fprintf(stderr, "[MKB] mouse+keyboard pad on (F9 toggles capture)\n");
             mkb_load_config();
             if (InterlockedCompareExchange(&s_thread_up, 0, 0) == 0) {
                 static LONG started = 0;
@@ -310,20 +388,30 @@ static int game_is_foreground(void)
  * does not move the pointer by itself, but Windows still moves it from
  * the same physical movement, so it would wander across the screen and
  * end up clicking other apps' title bars. */
+static volatile LONG s_cap_now;
+int mkb_capturing(void) { return (int)s_cap_now; }
 static void mkb_manage_cursor(int capture)
 {
+    s_cap_now = capture ? 1 : 0;
     static int hidden;          /* how many ShowCursor(FALSE) we owe  */
     static unsigned long last;
 
     unsigned long now = GetTickCount();
-    if (now - last < 500 && (capture ? hidden : !hidden) == 0)
+    /* holding Alt or a Windows key lets go of the pointer so you can click out */
+    if (capture && ((GetAsyncKeyState(VK_MENU) & 0x8000) || (GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000))) { capture = 0; last = 0; }
+    if (now - last < 150 && (capture ? hidden : !hidden) == 0)
         return;
     last = now;
 
     if (capture) {
         RECT r;
         HWND fg = GetForegroundWindow();
-        if (fg && GetWindowRect(fg, &r))
+        if (fg && GetClientRect(fg, &r)) {   /* client area only: keeps the pointer inside the picture */
+            POINT tl = { r.left, r.top }, br = { r.right, r.bottom };
+            ClientToScreen(fg, &tl); ClientToScreen(fg, &br);
+            r.left = tl.x; r.top = tl.y; r.right = br.x; r.bottom = br.y;
+            ClipCursor(&r);
+        } else if (fg && GetWindowRect(fg, &r))
             ClipCursor(&r);
         if (hidden < 5) { ShowCursor(FALSE); hidden++; }
     } else {
@@ -354,7 +442,203 @@ static void mkb_aim_vector(double ax, double ay, SHORT *out_x, SHORT *out_y)
     *out_y = (SHORT)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
 }
 
-#define MK_VK(k)  ((unsigned)(k) < 256 && s_vk_down[(k)])
+#define MK_VK(k)  (!mkb_txt && (unsigned)(k) < 256 && s_vk_down[(k)] && !s_blk[(k)])
+
+
+/* Menu cursor feed: mouse counts since the last call and the left button
+ * level, independent of the aim path. Returns 0 when capture is off or the
+ * game is not the foreground window. */
+int mkb_menu_poll(int *dx, int *dy, int *left)
+{
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("RECOMP_MKB_MENU"); en = !(e && e[0] == '0'); }
+    *dx = *dy = *left = 0;
+    if (!en || !mkb_enabled() || !s_thread_up || !s_active) return 0;
+    if (g_sg1_menu_open) { InterlockedExchange(&s_mdx, 0); InterlockedExchange(&s_mdy, 0); return 0; }
+    if (!game_is_foreground()) { InterlockedExchange(&s_mdx, 0); InterlockedExchange(&s_mdy, 0); return 0; }
+    *dx = (int)InterlockedExchange(&s_mdx, 0);
+    *dy = (int)InterlockedExchange(&s_mdy, 0);
+    *left = (int)s_mlvl | ((int)s_mrlvl << 1);   /* bit0 left, bit1 right */
+    return 1;
+}
+
+
+/* Native mouse look: raw counts go to the engine as IK_MouseX/Y axis events (the
+ * game's own MouseX=Axis aMouseX binding and MouseSensitivity then apply), instead
+ * of being faked as a joystick. RECOMP_MKB_NATIVE=0 goes back to the stick path. */
+int mkb_native_aim(void)
+{
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("RECOMP_MKB_NATIVE"); en = !(e && e[0] == '0'); }
+    return en;
+}
+
+/* ---- SG1: settings store + overlay state ------------------------------------------------------
+ * sg1_settings.txt (key=value lines, next to the exe) holds what the in-game menu changes. */
+volatile LONG g_sg1_menu_open;                  /* the Insert overlay is up: the game gets no keyboard/mouse */
+int g_mkb_invert_y;
+static char s_cfg_k[32][32], s_cfg_v[32][64];
+static int s_cfg_n, s_cfg_loaded;
+static void cfg_load(void)
+{
+    FILE *f;
+    char line[128];
+    s_cfg_loaded = 1;
+    f = fopen("sg1_settings.txt", "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f) && s_cfg_n < 32) {
+        char *eq = strchr(line, '=');
+        size_t n;
+        if (!eq) continue;
+        *eq++ = 0;
+        n = strlen(eq);
+        while (n && (eq[n - 1] == '\n' || eq[n - 1] == '\r' || eq[n - 1] == ' ')) eq[--n] = 0;
+        strncpy(s_cfg_k[s_cfg_n], line, 31); s_cfg_k[s_cfg_n][31] = 0;
+        strncpy(s_cfg_v[s_cfg_n], eq, 63); s_cfg_v[s_cfg_n][63] = 0;
+        s_cfg_n++;
+    }
+    fclose(f);
+}
+const char *sg1_cfg_get(const char *k)
+{
+    int i;
+    if (!s_cfg_loaded) cfg_load();
+    for (i = 0; i < s_cfg_n; i++) if (!strcmp(s_cfg_k[i], k)) return s_cfg_v[i];
+    return NULL;
+}
+void sg1_cfg_set(const char *k, const char *v)
+{
+    int i;
+    FILE *f;
+    if (!s_cfg_loaded) cfg_load();
+    for (i = 0; i < s_cfg_n; i++) if (!strcmp(s_cfg_k[i], k)) break;
+    if (i == s_cfg_n) { if (s_cfg_n >= 32) return; s_cfg_n++; strncpy(s_cfg_k[i], k, 31); s_cfg_k[i][31] = 0; }
+    strncpy(s_cfg_v[i], v, 63); s_cfg_v[i][63] = 0;
+    f = fopen("sg1_settings.txt", "w");
+    if (!f) return;
+    for (i = 0; i < s_cfg_n; i++) fprintf(f, "%s=%s\n", s_cfg_k[i], s_cfg_v[i]);
+    fclose(f);
+}
+int sg1_cfg_int(const char *k, int def) { const char *v = sg1_cfg_get(k); return v ? atoi(v) : def; }
+float sg1_cfg_float(const char *k, float def) { const char *v = sg1_cfg_get(k); return v ? (float)atof(v) : def; }
+
+/* Native-aim scale: env RECOMP_MKB_NATIVE_SCALE, else the saved value, else 50. */
+static float s_mscale = -1.0f;
+float mkb_scale_get(void)
+{
+    if (s_mscale < 0) {
+        const char *e = getenv("RECOMP_MKB_NATIVE_SCALE");
+        s_mscale = e ? (float)atof(e) : sg1_cfg_float("mouse_scale", 50.0f);
+        if (s_mscale <= 0) s_mscale = 50.0f;
+        g_mkb_invert_y = sg1_cfg_int("invert_y", 0);
+    }
+    return s_mscale;
+}
+void mkb_scale_mul(float f)
+{
+    char b[32];
+    float v = mkb_scale_get() * f;
+    if (v < 0.5f) v = 0.5f;
+    if (v > 2000.0f) v = 2000.0f;
+    s_mscale = v;
+    snprintf(b, sizeof b, "%.3f", (double)v);
+    sg1_cfg_set("mouse_scale", b);
+    fprintf(stderr, "[MKB] native mouse scale %.2f\n", (double)v);
+}
+void mkb_invert_y_toggle(void)
+{
+    mkb_scale_get();
+    g_mkb_invert_y = !g_mkb_invert_y;
+    sg1_cfg_set("invert_y", g_mkb_invert_y ? "1" : "0");
+}
+
+int mkb_game_mouse(int *dx, int *dy)
+{
+    int menu = s_menu_tick && (LONG)GetTickCount() - s_menu_tick < 250;
+    LONG x, y;
+    *dx = *dy = 0;
+    x = InterlockedExchange(&s_gdx, 0);
+    y = InterlockedExchange(&s_gdy, 0);
+    if (!mkb_native_aim() || !mkb_enabled() || !s_thread_up || !s_active) return 0;
+    if (!game_is_foreground() || menu || s_console_typing || g_sg1_menu_open) return 0;
+    *dx = (int)x; *dy = (int)y;
+    return (x || y);
+}
+
+/* ---- SG1: set the in-game name from the selected profile ----
+ * The multiplayer URL takes ?Name= from the engine's default URL, which the
+ * profile menu never updates. Once a match is loaded the console command
+ * "SetName <profile>" fixes both the player name and the default URL, so the
+ * recompiled build types it into the console by itself. */
+static char s_prof[40];
+static volatile LONG s_nm_due, s_nm_done;                 /* tick at which to type, 0 = idle */
+static KbEvt s_nm_seq[160]; static int s_nm_n, s_nm_i; static DWORD s_nm_t;
+void mkb_set_profile(const char *name)
+{
+    int i, n = 0;
+    for (i = 0; name[i] && n < 30; i++) {
+        char c = name[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') s_prof[n++] = c; else break;
+    }
+    s_prof[n] = 0;
+    fprintf(stderr, "[MKB] profile name '%s'\n", s_prof); fflush(stderr);
+}
+void mkb_arm_name(int delay_ms)
+{
+    LONG due;
+    if (!s_prof[0]) return;
+    if (delay_ms < 0) { if (s_nm_done) return; delay_ms = -delay_ms; } else s_nm_done = 0;
+    due = (LONG)(GetTickCount() + (DWORD)delay_ms); if (!due) due = 1;
+    s_nm_due = due; s_nm_n = 0; s_nm_i = 0;
+    fprintf(stderr, "[MKB] will set in-game name in %d ms\n", delay_ms); fflush(stderr);
+}
+static void nm_add(unsigned vk, int down, unsigned ch) { if (s_nm_n < 158) { s_nm_seq[s_nm_n].vk = (unsigned short)vk; s_nm_seq[s_nm_n].down = (unsigned char)down; s_nm_seq[s_nm_n].rep = 0; s_nm_seq[s_nm_n].ch = (unsigned short)ch; s_nm_n++; } }
+static volatile LONG s_nm_end;
+int mkb_name_busy(void) { return s_nm_n > 0 || (s_nm_end && (LONG)(GetTickCount() - (DWORD)s_nm_end) < 0); }
+static int nm_next(int *vk, int *down, int *rep, int *ch)
+{
+    DWORD now = GetTickCount();
+    if (s_nm_due && !s_nm_n) {
+        if ((LONG)(now - (DWORD)s_nm_due) < 0) return 0;
+        {   const char *cmd = "SetName "; int i;
+            nm_add(0x67, 1, 0); nm_add(0x67, 0, 0);
+            nm_add(0x20, 1, ' '); nm_add(0x20, 0, 0);          /* first char is swallowed */
+            for (i = 0; cmd[i]; i++) { unsigned c = (unsigned char)cmd[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : (c == ' ' ? 0x20 : c); nm_add(v, 1, c); nm_add(v, 0, 0); }
+            for (i = 0; s_prof[i]; i++) { unsigned c = (unsigned char)s_prof[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : c; nm_add(v, 1, c); nm_add(v, 0, 0); }
+            nm_add(0x0D, 1, 0); nm_add(0x0D, 0, 0);
+        }
+        s_nm_i = 0; s_nm_t = now;
+        fprintf(stderr, "[MKB] typing SetName %s\n", s_prof); fflush(stderr);
+    }
+    if (!s_nm_n) return 0;
+    if (s_nm_i >= s_nm_n) { s_nm_n = 0; s_nm_due = 0; s_nm_done = 1; s_nm_end = (LONG)(now + 400); return 0; }
+    if (now - s_nm_t < (s_nm_i < 2 ? 150u : 35u)) return 0;
+    s_nm_t = now;
+    *vk = s_nm_seq[s_nm_i].vk; *down = s_nm_seq[s_nm_i].down; *rep = 0; *ch = s_nm_seq[s_nm_i].ch;
+    s_nm_i++;
+    return 1;
+}
+
+/* Next real keyboard event for the game. Returns 0 when none (or capture is off). */
+int mkb_kbd_pop(int *vk, int *down, int *rep, int *ch)
+{
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("RECOMP_MKB_KEYS"); en = !(e && e[0] == '0'); }
+    if (!en || !mkb_enabled() || !s_thread_up) return 0;
+    if (s_nm_due && s_active && game_is_foreground() && nm_next(vk, down, rep, ch)) return 1;
+    if (s_kq_r == s_kq_w) return 0;
+    if (!s_active || !game_is_foreground()) { s_kq_r = s_kq_w; return 0; }
+    {
+        KbEvt *e = &s_kq[s_kq_r & 255];
+        *vk = e->vk; *down = e->down; *rep = e->rep; *ch = e->ch;
+        MemoryBarrier();
+        s_kq_r++;
+        /* while the name is being typed, keys you are physically holding must not leak into the console */
+        if (mkb_name_busy() && *down) return 0;
+        if (g_sg1_menu_open && *down) return 0;     /* the overlay owns the keyboard; key-ups still pass so nothing sticks */
+    }
+    return 1;
+}
 
 int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
 {
@@ -367,8 +651,17 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     if (!pState || dwPort != 0 || !mkb_enabled())
         return 0;
+    mkb_txt = mkb_text_mode();
+    { int bk; for (bk = 0; bk < 256; bk++) { if (mkb_txt && s_vk_down[bk]) s_blk[bk] = 1; else if (!s_vk_down[bk]) s_blk[bk] = 0; } }
     if (!s_thread_up)
         return 0;
+
+    if (g_sg1_menu_open) {
+        mkb_manage_cursor(0);
+        InterlockedExchange(&s_dx, 0);
+        InterlockedExchange(&s_dy, 0);
+        return 0;
+    }
 
     if (!s_active) {
         mkb_manage_cursor(0);
@@ -387,8 +680,33 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     dx    = InterlockedExchange(&s_dx, 0);
     dy    = InterlockedExchange(&s_dy, 0);
+    {   /* SG1: the emulated USB pad is polled about every millisecond, far
+         * faster than the game reads it, so most polls see no mouse movement
+         * and the game usually reads a centred stick. Report the movement of
+         * the last ~40 ms instead, so a read at any moment sees it. */
+        static struct { LONGLONG t; LONG dx, dy; } hist[128];
+        static int hn;
+        static LONGLONG freq;
+        LARGE_INTEGER now;
+        LONGLONG win;
+        LONG sx = 0, sy = 0;
+        int k;
+        if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; }
+        QueryPerformanceCounter(&now);
+        win = freq * 40 / 1000;
+        if (dx || dy) {
+            hist[hn & 127].t = now.QuadPart; hist[hn & 127].dx = dx; hist[hn & 127].dy = dy;
+            hn++;
+        }
+        for (k = 0; k < 128 && k < hn; k++) {
+            int i = (hn - 1 - k) & 127;
+            if (now.QuadPart - hist[i].t > win) break;
+            sx += hist[i].dx; sy += hist[i].dy;
+        }
+        dx = sx; dy = sy;
+    }
     wheel = InterlockedExchange(&s_wheel, 0);
-    btn   = InterlockedExchange(&s_mouse_btn, 0);
+    btn   = (LONG)s_mouse_btn;   /* SG1: level, not a one-poll pulse: the game reads the pad far less often than we poll */
 
     memset(analog, 0, sizeof analog);
 
@@ -409,11 +727,28 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
     }
 
     /* ---- mouse: aim ---- */
-    if (dx || dy) {
+    if ((dx || dy) && !mkb_native_aim()) {
         double ax =  (double)dx / (double)s_cfg.full;
         double ay = -(double)dy / (double)s_cfg.full;
         if (s_cfg.invert_y) ay = -ay;
         mkb_aim_vector(ax, ay, &aim_x, &aim_y);
+        {
+            static int shown;
+            if (shown < 25) {
+                shown++;
+                fprintf(stderr, "  [MKB] aim counts dx=%ld dy=%ld -> stick %d,%d (raw events %ld, absolute %ld)\n",
+                        (long)dx, (long)dy, (int)aim_x, (int)aim_y, (long)s_raw_events, (long)s_abs_events);
+            }
+        }
+    }
+    {
+        static DWORD last_report;
+        DWORD tnow = GetTickCount();
+        if (tnow - last_report > 10000) {
+            last_report = tnow;
+            fprintf(stderr, "  [MKB] status: raw mouse events %ld (absolute %ld), foreground ok\n",
+                    (long)s_raw_events, (long)s_abs_events);
+        }
     }
 
     /* ---- keyboard: buttons (Black's layout) ---- */
@@ -424,7 +759,7 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
     if (MK_VK('F'))       analog[XBOX_BUTTON_BLACK] = 255; /* alt gren. */
     if (btn & 0x08)       analog[XBOX_BUTTON_WHITE] = 255; /* X1        */
     if (btn & 0x10)       analog[XBOX_BUTTON_BLACK] = 255; /* X2        */
-    if (MK_VK(VK_RETURN) || MK_VK(VK_ESCAPE)) b |= XBOX_GAMEPAD_START;
+    if (MK_VK(VK_RETURN) || MK_VK(VK_ESCAPE)) { b |= XBOX_GAMEPAD_START; if (!s_startdbg) fprintf(stderr, "[STARTDBG] mkb start edge\n"); s_startdbg = 1; } else s_startdbg = 0;
     if (MK_VK(VK_TAB))                         b |= XBOX_GAMEPAD_BACK;
     if (MK_VK(VK_LSHIFT))                      b |= XBOX_GAMEPAD_LEFT_THUMB;
     if (MK_VK(VK_LCONTROL))                    b |= XBOX_GAMEPAD_RIGHT_THUMB;

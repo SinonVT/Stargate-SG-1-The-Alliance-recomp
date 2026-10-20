@@ -73,6 +73,7 @@ void nv2a_vsh_program_word(uint32_t word)
 
 void nv2a_vsh_set_start_slot(uint32_t slot) { s_start_slot = slot; }
 void nv2a_vsh_set_cxt_write(uint32_t enable) { s_cxt_write = enable; }
+int nv2a_vsh_cxt_write_enabled(void) { return s_cxt_write != 0; }
 
 void nv2a_vsh_set_constant_load(uint32_t index)
 {

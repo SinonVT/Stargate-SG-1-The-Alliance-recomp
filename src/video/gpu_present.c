@@ -170,7 +170,31 @@ int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
 /* Returns 0 when nothing was shown: the window is occluded or the display
  * is off, and Present does not wait for vsync then -- the caller must pace
  * itself instead of spinning. The pixels are read before this returns. */
-int gpu_present_frame(const uint32_t *pixels)
+static int present_impl(const uint32_t *pixels);
+int gpu_present_frame(const uint32_t *pixels) { return present_impl(pixels); }
+
+/* A frame of another size than the one the texture was made for (the renderer's resolution changed):
+ * the texture is remade at that size first. */
+int gpu_present_frame_sized(const uint32_t *pixels, uint32_t w, uint32_t h)
+{
+    if (!s_dev) return 0;
+    if (w != s_w || h != s_h) {
+        D3D11_TEXTURE2D_DESC td;
+        ID3D11Texture2D *nt = NULL; ID3D11ShaderResourceView *ns = NULL;
+        ZeroMemory(&td, sizeof td);
+        td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &nt))) return 0;
+        if (FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)nt, NULL, &ns))) { ID3D11Texture2D_Release(nt); return 0; }
+        if (s_srv) ID3D11ShaderResourceView_Release(s_srv);
+        if (s_frame) ID3D11Texture2D_Release(s_frame);
+        s_frame = nt; s_srv = ns; s_w = w; s_h = h;
+    }
+    return present_impl(pixels);
+}
+
+static int present_impl(const uint32_t *pixels)
 {
     static const float black[4] = {0, 0, 0, 1};
     D3D11_VIEWPORT vp;

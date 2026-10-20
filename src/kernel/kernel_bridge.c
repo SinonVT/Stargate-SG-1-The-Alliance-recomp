@@ -1285,7 +1285,11 @@ static void bridge_NtAllocateVirtualMemory(void)
      * two. This clamp is enough for a title that reserves generously and
      * commits little, and it fails loudly and later rather than silently and
      * at startup if one does not. */
-    uint32_t xbox_va = xbox_HeapAlloc(size, 4096);
+    /* LOCAL PATCH (sg1): Xbox/NT virtual allocations are 64 KB-granular. This
+     * title's pool allocator (sub_000194B0/sub_00019780) keys its pool-info
+     * table on (pointer >> 16) and assumes each 64 KB region holds one pool
+     * block, so 4 KB-aligned blocks that share a 64 KB region corrupt it. */
+    uint32_t xbox_va = xbox_HeapAlloc(size, 65536);
     if (!xbox_va && (alloc_type & 0x2000) && !(alloc_type & 0x1000)) {
         /* A pure reservation too big for the heap. Take it from the mapped
          * space above RAM, where it costs no heap and the pages are distinct.
@@ -2050,9 +2054,27 @@ static void bridge_KeWaitForSingleObject(void)
         int type;
         HANDLE ge = ke_guest_event_prepare(object, &type);
         if (ge) {
-            g_eax = (uint32_t)xbox_KeWaitForSingleObject(
-                ge, wait_reason, wait_mode,
-                (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+            /* The GPU interrupt that would set this event is not modelled, so an
+             * INFINITE wait on a title-built event would hang. Bound it: after
+             * RECOMP_TITLE_KEVENTS_MS (default 8) report it satisfied -- as the
+             * "GPU caught up" it stands for -- and let the caller re-check. */
+            static int ms = -1;
+            LARGE_INTEGER bound;
+            if (ms < 0) { const char *e = getenv("RECOMP_TITLE_KEVENTS_MS"); ms = e ? atoi(e) : 8; }
+            if (!timeout_ptr && ms > 0) {
+                bound.QuadPart = -(LONGLONG)ms * 10000;
+                g_eax = (uint32_t)xbox_KeWaitForSingleObject(
+                    ge, wait_reason, wait_mode, (BOOLEAN)alertable, &bound);
+                if (g_eax == 0x102u) {                 /* timed out: treat as signalled */
+                    static unsigned bounded;
+                    if (bounded++ < 5 || (bounded % 1000) == 0)
+                        fprintf(stderr, "  [KERNEL] title event 0x%08X: wait bounded after %d ms (x%u)\n", object, ms, bounded);
+                    g_eax = 0;
+                }
+            } else
+                g_eax = (uint32_t)xbox_KeWaitForSingleObject(
+                    ge, wait_reason, wait_mode,
+                    (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
             if (g_eax == 0 && type == 1)               /* synchronization: consumed */
                 BRIDGE_MEM32(object + 4) = 0;
             return;
@@ -2068,6 +2090,34 @@ static void bridge_KeWaitForSingleObject(void)
     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
         h, wait_reason, wait_mode,
         (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    {   /* SG1 debug: a wait that is called millions of times is a spin */
+        static struct { uint32_t obj; unsigned n; } hot[16];
+        static int dbg = -1;
+        int i, f = -1;
+        if (dbg < 0) dbg = getenv("RECOMP_WAIT_LOG") != NULL;
+        if (dbg) {
+            for (i = 0; i < 16; i++) {
+                if (hot[i].obj == object) { f = i; break; }
+                if (!hot[i].obj && f < 0) f = i;
+            }
+            if (f >= 0) {
+                hot[f].obj = object;
+                hot[f].n++;
+                if (hot[f].n == 100000 || (hot[f].n % 1000000) == 0) {
+                    uint32_t to_lo = 0, to_hi = 0;
+                    if (timeout_ptr) { to_lo = BRIDGE_MEM32(timeout_ptr); to_hi = BRIDGE_MEM32(timeout_ptr + 4); }
+                    fprintf(stderr, "  [WAITSPIN] obj=0x%08X calls=%u type=%u signal=%d size=%u timeout=%s %08X%08X result=0x%08X reason=%u mode=%u alert=%u esp=0x%08X ret=0x%08X\n",
+                            object, hot[f].n, BRIDGE_MEM32(object) & 0xFF, (int)BRIDGE_MEM32(object + 4),
+                            (BRIDGE_MEM32(object) >> 16) & 0xFF,
+                            timeout_ptr ? "ptr" : "INFINITE", to_hi, to_lo, g_eax,
+                            wait_reason, wait_mode, alertable, g_esp, BRIDGE_MEM32(g_esp));
+                    { int k; fprintf(stderr, "  [WAITSPIN] stack:");
+                      for (k = 0; k < 24; k++) fprintf(stderr, " %08X", BRIDGE_MEM32(g_esp + 4u * (unsigned)k));
+                      fprintf(stderr, "\n  [WAITSPIN] regs: eax=%08X ecx=%08X edx=%08X ebx=%08X esi=%08X edi=%08X\n", g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi); }
+                }
+            }
+        }
+    }
 }
 
 /* ── NtWaitForSingleObject (ordinal 233) ─────────────────── */
@@ -4748,7 +4798,7 @@ static void bridge_NtReadFile(void)
     /* What a read actually delivered. A decoder that rejects its input cannot
      * say whether the bytes were wrong or the read was, and the two look
      * identical from inside the title -- the first bytes settle it. */
-    {
+    if (getenv("RECOMP_READ_LOG")) {
         const uint8_t *p = (const uint8_t *)XBOX_TO_NATIVE(buffer_va);
         uint32_t got = (uint32_t)ios.Information;
         /* The offset matters as much as the length. A title streaming a pack
