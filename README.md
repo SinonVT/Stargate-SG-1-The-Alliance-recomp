@@ -5,7 +5,7 @@ A work-in-progress native Windows port of the unreleased Xbox game *Stargate SG-
 **No game files, no generated game code and no executables are in this repository.** You need your own copy of the game, and you generate the recompiled code yourself from your own `default.xbe`.
 
 ## Status
-Boots Unreal Engine 2, shows the animated main menu, has audio, keyboard and mouse input, profile creation, and loads levels (Deathmatch maps are walkable). Menu speed is about 25-35 fps on a GTX 750. Known gaps: some maps are missing from the dump, black windows in room meshes, heat-haze effects are not emulated, game-mode editing screens are incomplete.
+Boots Unreal Engine 2, shows the animated main menu, has audio, keyboard, mouse and gamepad input, profile creation, and loads levels (Deathmatch maps are walkable). Player (projected) shadows now render. Menu speed is about 25-35 fps on a GTX 750. Known gaps: some maps are missing from the dump, black windows in room meshes, levels look too dark in places (vertex lighting is zero on many static meshes), fire and brazier emitters are frozen, anisotropic filtering or high resolutions can corrupt lighting, a rare crash in the object list, game-mode editing screens are incomplete.
 
 ## Layout
 - Repository root (`src/`, `include/`, `docs/` ...) - the xboxrecomp toolkit with our changes (kernel/NV2A executor, input, video). The original toolkit README is kept as `README-xboxrecomp.md`.
@@ -16,7 +16,7 @@ Boots Unreal Engine 2, shows the animated main menu, has audio, keyboard and mou
 ## Building
 1. Extract the game from your own disc image so you have `default.xbe` and `System/`.
 2. Run the xboxrecomp pipeline on `default.xbe` to generate `sg1_alliance/src/recomp/gen/` (see the xboxrecomp docs). Apply the patches in `game_hooks/` to the generated `recomp_0047.c` and `recomp_0109.c`.
-3. Set the game paths near the top of `sg1_alliance/src/main.c`.
+3. Nothing to edit for paths: the exe looks for `default.xbe` in its own folder and its parent folders (or in `RECOMP_GAME_DIR` if set).
 4. In a VS 2022 x64 Native Tools prompt:
 
 ```
@@ -35,7 +35,7 @@ dbglaunch.exe sg1_alliance_recomp.exe
 Useful environment variables (some are set by default in `main.c`): `RECOMP_PB_EXEC=1`, `RECOMP_GPU=1`, `RECOMP_FB_WINDOW=1`, `RECOMP_VBLANK=paced`, `RECOMP_MKB=1` (mouse and keyboard). Variables set with `set` stay in a command window, so use a fresh prompt when measuring performance.
 
 ## In-game settings (Insert)
-Mouse sensitivity, Invert Y, Resolution (480p to 2160p), Anisotropic filter, Mipmaps and Texture upscale (off / 2x / 4x / 8x). Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
+Mouse sensitivity, Invert Y, Controllers on/off, Resolution (480p to 2160p), Anisotropic filter, Mipmaps, Texture upscale (off / 2x / 4x / 8x), Heat haze, Player shadows, and a few debug items (texture dump, draw logs, hide draws). Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
 
 ## What we changed in xboxrecomp
 Performance
@@ -48,14 +48,16 @@ Performance
 Rendering
 - D3D11 back end with register-combiner HLSL, render-target and texture caches, resolution scaling, mipmaps, anisotropic filtering.
 - Live texture upscale (Catmull-Rom plus light sharpen), up to 8x, capped at 2048x2048 per texture (`RECOMP_UPSCALE`).
+- Player shadows: B8 shadow-map render targets are rasterised, and fixed-function texture-coordinate generation (eye/object linear planes, projective S/T/Q, normal map, reflection, sphere) is emulated in the vertex path. Toggle with Player shadows in the Insert menu (`shadows` in `sg1_settings.txt`).
 - COLOR_MATERIAL lighting fix; unsupported texture-shader modes are skipped instead of drawn black.
 
 Input
-- Native mouse look, mouse buttons, keyboard mapping, hidden and clipped cursor, USB gamepad thread fixes.
+- Native mouse look, mouse buttons, keyboard mapping, hidden and clipped cursor, USB gamepad thread fixes, a Controllers on/off setting, and held keys now repeat correctly.
 
 ## Caveats
 - Tested on one machine (GTX 750, many cores). Threading is disabled below 4 cores.
-- Some debug logging is still in: `[HUDDRAW]`, `[TEXFMT]`, and a `texdump` folder written next to the exe. Delete the dump folders before sharing a build directory.
+- Debug logging is off unless you enable the debug items in the Insert menu; those can write logs, `texdump` folders and small `rt128_*.bmp` files next to the exe. Delete them before sharing a build directory.
+- In-game gamma/brightness/contrast keys (F10/F11/F12) work, but F12 crashes when a debugger is attached (Windows reserves it). The original `UnrealEngine2.ini` values are Brightness 0.8, Contrast 0.7, Gamma 0.8.
 - This is not an official project and has no affiliation with the game's rights holders.
 
 ## Credits
