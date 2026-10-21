@@ -1478,7 +1478,8 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
             need = (st == 0);
         srv[st] = g_white;
         smp[st] = NULL;
-        if (b->use_rc && t->cube && b->tex_valid[st] && ((b->rc.stage_program >> (st * 5)) & 0x1Fu) == 3u) {
+        if (b->use_rc && t->cube && b->tex_valid[st] && ((b->rc.stage_program >> (st * 5)) & 0x1Fu) == 3u
+                && !((b->rc.stage_program & 0x7FFFu) == 0x0C21u && g_lastrthit)) {   /* SG1: only the projected-shadow receiver (prog 0C21 whose stage 0 is the shadow-map render target) keeps the neutral cube lookup; characters and weapons with the same program keep cube lighting, or the shadow turns into a black square */
             csrv[st] = cube_srv(t);
             if (csrv[st]) cb.cube[st] = 1.0f;
         }
