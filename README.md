@@ -38,7 +38,7 @@ Do not try to run the pieces by hand unless you have to: the generated code must
 Common problems: "capstone not found" (setup installs it; if pip is blocked run `pip install capstone`), "cmake not found" (use the VS Native Tools prompt, not a normal one), mismatched Python (use `py -3`), and a black or empty window (the exe could not find `default.xbe`; see step 3).
 
 ## Building by hand
-Only if you did not use the script: run the xboxrecomp pipeline on your `default.xbe` (`tools.xbe_parser --json`, `tools.disasm --text-only`, `tools.func_id`, `tools.abi_analysis`, then `python -m tools.recomp default.xbe --all --split 250 --gen-dir sg1_alliance/src/recomp/gen`), run `python sg1_alliance/game_hooks/apply_hooks.py`, then `cd sg1_alliance`, `cmake -S . -B build -DXBOXRECOMP_DIR=..`, `cmake --build build --config Release`.
+Only if you did not use the script: run the xboxrecomp pipeline on your `default.xbe` (`tools.xbe_parser --json`, `tools.disasm` (without --text-only, which misses about 2,900 functions), `tools.func_id`, `tools.abi_analysis`, then `python -m tools.recomp default.xbe --all --split 250 --gen-dir sg1_alliance/src/recomp/gen`), run `python sg1_alliance/game_hooks/apply_hooks.py`, then `cd sg1_alliance`, `cmake -S . -B build -DXBOXRECOMP_DIR=..`, `cmake --build build --config Release`.
 
 ## HD texture pack
 The pack is built from your own game files, so it is not in the repository (about 850 MB).

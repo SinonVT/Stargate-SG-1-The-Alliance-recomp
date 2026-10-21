@@ -89,15 +89,21 @@ def xnet_rule():
 xnet_rule()
 for pf in sorted(glob.glob(os.path.join(here,'*.patch'))):
     for name,hunks in parse(open(pf,encoding='utf-8',errors='replace').read()):
-        hunks=[h for h in hunks if h]
-        path=locate(name,hunks)
-        if not path: print('%-34s %-18s FAILED (code to patch not found; was the generator run with --all --split 250?)'%(os.path.basename(pf),name)); bad+=1; continue
-        raw,crlf,src=get(path); res=[]; changed=False
+        hunks=[h for h in hunks if h]; res=[]; files=[]
         for h in hunks:
-            st=state(src,h)
+            # each hunk is located on its own (a different --split can put one patch's hunks in different files)
+            cands=[os.path.join(gen,name)]+[f for f in allfiles if os.path.basename(f)!=name]
+            hit=None
+            for c in cands:
+                if not os.path.exists(c): continue
+                st=state(get(c)[2],h)
+                if st!='no': hit=(c,st); break
+            if not hit: res.append('FAILED'); bad+=1; continue
+            c,st=hit; raw,crlf,src=get(c)
+            if os.path.basename(c) not in files: files.append(os.path.basename(c))
             if st=='already': res.append('already'); continue
             old=[x[1:] for x in h if x[0] in ' -']; new=[x[1:] for x in h if x[0] in ' +']
-            k=find(src,old); src[k:k+len(old)]=new; changed=True; res.append('applied')
-        print('%-34s %-18s %s'%(os.path.basename(pf),os.path.basename(path),', '.join(res)))
-        if changed and not check: save(path,raw,crlf,src); cache.pop(path,None)
+            k=find(src,old); src[k:k+len(old)]=new; res.append('applied')
+            if not check: save(c,raw,crlf,src); cache.pop(c,None)
+        print('%-40s %-26s %s'%(os.path.basename(pf),'+'.join(files) or name,', '.join(res)))
 sys.exit(1 if bad else 0)
