@@ -576,7 +576,7 @@ int sg1_controllers_on(void)
 {
     if (s_ctl_on < 0) {
         const char *e = getenv("RECOMP_CONTROLLERS");
-        s_ctl_on = e ? !(e[0] == '0') : (sg1_cfg_int("controllers", 1) != 0);
+        s_ctl_on = e ? !(e[0] == '0') : (sg1_cfg_int("controllers", 0) != 0);
     }
     return s_ctl_on;
 }

@@ -36,7 +36,7 @@ python sg1_alliance/tools/make_hdpack.py "C:\path\to\game" "sg1_alliance\build\R
 
 This writes `texpack\hd\*.png` and `texpack\index.txt` next to the exe (a few minutes; you can run it again, it resumes). A C compiler makes it faster, otherwise a slower pure-Python hash is used. Turn it on or off with "HD texture pack" in the Insert menu (`hdpack` in `sg1_settings.txt`). The default size cap is 1024 px per texture; pass a third argument (for example `512`) if a level stutters or runs out of video memory.
 
-Want your own AI-upscaled or hand-painted versions? Put a PNG with the **same file name** as one in `texpack\hd` into `texpack\custom` (`texpack\upscale_dump.bat` runs Real-ESRGAN over the whole `hd` folder into `custom` if you have it). Files in `custom` win over the shipped ones ("Custom textures" in the menu). Delete a file from `custom` to go back to the original.
+Want your own AI-upscaled or hand-painted versions? Put a PNG with the **same file name** as one in `texpack\hd` into `texpack\custom` (`texpack\upscale_dump.bat` runs Real-ESRGAN over the whole `hd` folder into `custom` if you have it). Files in `custom` win over the shipped ones once you turn on "Custom textures" in the Insert menu (it is off by default because the HD pack already covers the stock game). Delete a file from `custom` to go back to the original.
 
 ## Running
 From `sg1_alliance\build\Release`:
@@ -48,7 +48,7 @@ dbglaunch.exe sg1_alliance_recomp.exe
 Useful environment variables (some are set by default in `main.c`): `RECOMP_PB_EXEC=1`, `RECOMP_GPU=1`, `RECOMP_FB_WINDOW=1`, `RECOMP_VBLANK=paced`, `RECOMP_MKB=1` (mouse and keyboard). Variables set with `set` stay in a command window, so use a fresh prompt when measuring performance.
 
 ## In-game settings (Insert)
-Mouse sensitivity, Invert Y, Controllers on/off, Resolution (480p to 2160p), Anisotropic filter, Mipmaps, HD texture pack, Custom textures, Heat haze, Player shadows, Game gamma/brightness (applies the game's own gamma ramp), Dark area lift (off / low / medium / high / max) and a Debug page (texture dump, draw logs, hide draws, floor texgen fix, cube map lighting). Esc on the Debug page goes back. Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
+Mouse sensitivity, Invert Y, Controllers on/off, Resolution (480p to 2160p), Anisotropic filter, Mipmaps, HD texture pack, Custom textures, Heat haze, Player shadows, Game gamma/brightness (applies the game's own gamma ramp), Dark area lift (off / low / medium / high / max) and a Debug page (texture dump, draw logs, hide draws, floor texgen fix, cube map lighting). Esc on the Debug page goes back. Defaults on a fresh install: mouse sensitivity 50, controllers off, HD texture pack on, 720p, anisotropic off, mipmaps on, custom textures off, heat haze on, player shadows on, game gamma on, dark area lift low, floor texgen fix and cube map lighting on, debug items off. Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
 
 ## What we changed in xboxrecomp
 Performance

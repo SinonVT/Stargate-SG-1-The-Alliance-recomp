@@ -488,6 +488,7 @@ static void res_init(void)
     const char *e = getenv("RECOMP_RESOLUTION");
     int i;
     g_res_init = 1;
+    res_set_idx(1);   /* default: 720p */
     if (!e || !*e) {
         FILE *f = fopen("resolution.txt", "r");
         static char buf[32];
@@ -678,18 +679,18 @@ static void settings_init(void)
     const char *e;
     if (g_aniso >= 0) return;
     e = getenv("RECOMP_ANISO");
-    g_aniso = e ? atoi(e) : sg1_cfg_int("aniso", 8);
+    g_aniso = e ? atoi(e) : sg1_cfg_int("aniso", 1);
     if (g_aniso < 1) g_aniso = 1;
     if (g_aniso > 16) g_aniso = 16;
     e = getenv("RECOMP_MIPMAPS");
     g_mips = e ? !(e[0] == '0') : sg1_cfg_int("mips", 1) != 0;
     g_sg1_tg0 = sg1_cfg_int("shadows", 1) ? 1 : 0;
     g_sg1_gamma_on = sg1_cfg_int("gamma_ramp", 1) ? 1 : 0;
-    g_sg1_lightfloor = sg1_cfg_int("light_floor", 0);
+    g_sg1_lightfloor = sg1_cfg_int("light_floor", 1);
     g_sg1_texmat = sg1_cfg_int("texmat", 1) ? 1 : 0;
     g_sg1_cube = sg1_cfg_int("cubemaps", 1) ? 1 : 0;
     g_sg1_hdpack = sg1_cfg_int("hdpack", 1) ? 1 : 0;
-    g_sg1_custom = sg1_cfg_int("customtex", 1) ? 1 : 0;
+    g_sg1_custom = sg1_cfg_int("customtex", 0) ? 1 : 0;
     if (g_sg1_lightfloor < 0 || g_sg1_lightfloor > 4) g_sg1_lightfloor = 0;
     e = getenv("RECOMP_DEBUG_TEXDUMP");
     g_dbg_tex = e ? !(e[0] == '0') : sg1_cfg_int("dbg_texdump", 0) != 0;
