@@ -1047,7 +1047,7 @@ static ID3D11ShaderResourceView *tex_srv(const Nv2aTexture *t, uint32_t texel_uv
         return g_white;
     r = rt_find(t->offset);
     if (r && r != cur && r->w == t->width && r->h == t->height
-            && g_frame - r->last_draw <= 2) {
+            && g_frame - r->last_draw <= 6) {   /* SG1: was 2; when the game updates the shadow map less often than every frame the receiver fell back to a plain texture and flickered */
         r->last_use = g_frame;
         *rt_hit = 1;
         g_st_rtuse++;
@@ -1237,6 +1237,7 @@ static D3D11_TEXTURE_ADDRESS_MODE addr_map(uint32_t a)
     }
 }
 
+static int g_smp_nomip;   /* SG1: set for 2x-modulate (lightmap / shadow) draws: those textures must not use mip levels */
 static ID3D11SamplerState *get_sampler(const Nv2aTexture *t, uint32_t border_on, uint32_t border)
 {
     uint32_t mag = (t->filter >> 24) & 0xF, min = (t->filter >> 16) & 0xFF;
@@ -1253,7 +1254,7 @@ static ID3D11SamplerState *get_sampler(const Nv2aTexture *t, uint32_t border_on,
 
     key[0] = lin; key[1] = t->addr_u | (t->addr_v << 8);
     key[2] = border_on ? border : 0u;
-    key[3] = (uint32_t)aniso;
+    key[3] = (uint32_t)aniso | (g_smp_nomip ? 0x10000u : 0u);
     for (i = 0; i < g_nsmp; i++)
         if (!memcmp(g_smp[i].key, key, sizeof key)) return g_smp[i].s;
     if (g_nsmp >= MAX_STATE) return NULL;
@@ -1264,7 +1265,11 @@ static ID3D11SamplerState *get_sampler(const Nv2aTexture *t, uint32_t border_on,
     sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.MaxAnisotropy = lin && aniso > 1 ? (UINT)aniso : 1;
     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    sd.MaxLOD = g_smp_nomip ? 0.0f : D3D11_FLOAT32_MAX;
+    if (lin && aniso <= 1 && !g_smp_nomip) {   /* SG1: trilinear without anisotropic filtering picks a blurry mip on walls and floors seen at an angle; bias towards the sharper level (RECOMP_LODBIAS overrides, 0 = off) */
+        const char *lb = getenv("RECOMP_LODBIAS");
+        sd.MipLODBias = lb ? (float)atof(lb) : -0.6f;
+    }
     if (border_on) {
         sd.BorderColor[0] = (float)((border >> 16) & 255) / 255.0f;
         sd.BorderColor[1] = (float)((border >> 8) & 255) / 255.0f;
@@ -1447,6 +1452,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
 
     t0 = b->tex[0];
     g_lastrthit = 0;
+    g_smp_nomip = (rs->blend_enable && rs->blend_src == 0x0306 && rs->blend_dst == 0x0300 && (b->rc.stage_program & 0x7FFFu) != 0x0C21u) ? 1 : 0;   /* not the player-shadow receiver (0C21): it looked fine with mips */   /* lightmaps are atlases: mips would blend neighbouring charts (flickering black/white walls) */
     depth_max = rs->depth_max > 0.0f ? rs->depth_max : 16777215.0f;
     memset(&cb, 0, sizeof cb);
     cb.surf[0] = (float)s->width; cb.surf[1] = (float)s->height;
@@ -1505,7 +1511,12 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
                 cb.tex[st][0] = 1.0f / (float)t->width;
                 cb.tex[st][1] = 1.0f / (float)t->height;
             }
-            smp[st] = get_sampler(t, b->tex_border_on[st], b->tex_border[st]);
+            {   /* SG1: in the base + lightmap world pass (program 0x21) stage 1 is the lightmap atlas: no mips for it either */
+                int keep = g_smp_nomip;
+                if (b->use_rc && st == 1 && (b->rc.stage_program & 0x3FFu) == 0x21u) g_smp_nomip = 1;
+                smp[st] = get_sampler(t, b->tex_border_on[st], b->tex_border[st]);
+                g_smp_nomip = keep;
+            }
         }
         if (b->use_rc && g_haze && ((b->rc.stage_program >> (st * 5)) & 0x1Fu) == 9u) {
             ID3D11ShaderResourceView *hz = haze_scene(r);   /* refract the live scene, not the guest's copy */

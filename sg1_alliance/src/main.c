@@ -445,6 +445,13 @@ static void sg1_atexit_note(void)
 static LONG WINAPI sg1_unhandled(PEXCEPTION_POINTERS ep)
 {
     sg_log("UNHANDLED code=0x%08lX rip=%llX", (unsigned long)ep->ExceptionRecord->ExceptionCode, (unsigned long long)ep->ContextRecord->Rip);
+    {   /* SG1: enough in sg1_trace.txt to locate a crash without the console log: access type, address, rip as an offset into the exe */
+        unsigned long long base = (unsigned long long)(uintptr_t)GetModuleHandleA(NULL);
+        sg_log("  fault: %s addr=%llX  exe base=%llX rip offset=+%llX  xbox mem=%llX",
+               ep->ExceptionRecord->NumberParameters > 0 ? (ep->ExceptionRecord->ExceptionInformation[0] == 0 ? "read" : ep->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : "exec") : "?",
+               ep->ExceptionRecord->NumberParameters > 1 ? (unsigned long long)ep->ExceptionRecord->ExceptionInformation[1] : 0ull,
+               base, (unsigned long long)ep->ContextRecord->Rip - base, (unsigned long long)(uintptr_t)g_xbox_mem_offset);
+    }
     fprintf(stderr, "[UNHANDLED] code=0x%08lX RIP=0x%llX\n",
         (unsigned long)ep->ExceptionRecord->ExceptionCode,
         (unsigned long long)ep->ContextRecord->Rip);
