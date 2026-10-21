@@ -21,14 +21,15 @@ def parse(text):
             name=re.sub(r'\.bak_\w+$','',os.path.basename(name.replace('\\','/')))
             cur=(name,[]); out.append(cur)
         elif l.startswith('@@') and cur is not None:
-            h=[]; i+=1
+            skip=l.startswith('@@ -1,'); h=[]; i+=1
             while i<len(lines) and not lines[i].startswith('@@') and not lines[i].startswith('--- '):
                 if lines[i]=='': h.append(' ')
                 elif lines[i][0] in ' +-': h.append(lines[i])
                 elif lines[i].startswith('\\'): pass
                 i+=1
             while h and h[-1]==' ': h.pop()
-            cur[1].append(h); continue
+            if not skip: cur[1].append(h)
+            continue
         i+=1
     return out
 def find(src,seq,start=0):
@@ -37,45 +38,66 @@ def find(src,seq,start=0):
         if src[k:k+n]==seq: return k
     return -1
 bad=0
-# ---- rule-based hook: route the XNet entry points through our network shim (recomp_0103.c) ----
-XNET="004191CF,004191DA,004191E5,004191F0,004191FB,00419212,00419229,00419234,0041924E,00419259,00419264,0041926F,0041927A,00419285,00419294,004192A3,004192AE,004192B9,004192C4,004192CF,004192DA,00419303,0041931D,0041932C,00419346,0041938F,004195A0,004195B7,00419735,0041973A,0041A135,0041A292,0041A29B".split(',')
+# The recompiler numbers its output files by position, so on another machine a function can land in a different
+# recomp_XXXX.c than on ours. Targets are therefore found by CONTENT: the named file is tried first, then all others.
+INC='#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n'
+def load(path):
+    raw=open(path,'rb').read(); crlf=b'\r\n' in raw
+    return raw,crlf,raw.decode('utf-8','replace').replace('\r\n','\n').split('\n')
+def save(path,raw,crlf,src):
+    if not os.path.exists(path+'.orig_sg1'): open(path+'.orig_sg1','wb').write(raw)
+    if not any('#include <stdio.h>' in l for l in src[:40]): src=INC.split('\n')[:-1]+src
+    data='\n'.join(src)
+    if crlf: data=data.replace('\n','\r\n')
+    open(path,'wb').write(data.encode('utf-8'))
+allfiles=sorted(glob.glob(os.path.join(gen,'recomp_*.c')))
+cache={}
+def get(path):
+    if path not in cache: cache[path]=load(path)
+    return cache[path]
+def state(src,h):
+    old=[x[1:] for x in h if x[0] in ' -']; new=[x[1:] for x in h if x[0] in ' +']
+    if old!=new and find(src,new)>=0: return 'already'
+    return 'todo' if find(src,old)>=0 else 'no'
+def locate(name,hunks):
+    cands=[os.path.join(gen,name)]+[f for f in allfiles if os.path.basename(f)!=name]
+    for c in cands:
+        if not os.path.exists(c): continue
+        src=get(c)[2]
+        if all(state(src,h)!='no' for h in hunks): return c
+    return None
+XNET="004191CF,004191DA,004191E5,004191F0,004191FB,00419212,00419229,00419234,0041924E,00419259,00419264,0041926F,0041927A,00419285,00419294,004192A3,004192AE,004192B9,004192C4,004192CF,004192DA,00419303,0041931D,0041932C,00419346,0041938F,004195A0,004195B7,00419735,0041973A,0041A135,0041A292,0041A29B".split(",")
 def xnet_rule():
     global bad
-    path=os.path.join(gen,'recomp_0103.c')
-    if not os.path.exists(path): print('MISSING  %s (generate it first)'%path); bad+=1; return
-    raw=open(path,'rb').read(); crlf=b'\r\n' in raw
-    src=raw.decode('utf-8','replace').replace('\r\n','\n').split('\n'); out=[]; n=0; had=0
-    for i,l in enumerate(src):
-        out.append(l)
-        m=re.match(r'^loc_([0-9A-F]{8}): ;$',l)
-        if m and m.group(1) in XNET:
-            hook='    { extern int sg_xnet_hle(uint32_t); int hn = sg_xnet_hle(0x%sU); if (hn >= 0) { esp += 4u + (uint32_t)hn; return; } }'%m.group(1)
-            if i+1<len(src) and 'sg_xnet_hle' in src[i+1]: had+=1
-            else: out.append(hook); n+=1
-    print('%-28s %-34s %s'%('(xnet rule)','recomp_0103.c','applied %d, already %d'%(n,had)))
-    if n and not check:
-        if not os.path.exists(path+'.orig_sg1'): open(path+'.orig_sg1','wb').write(raw)
-        data='\n'.join(out)
-        if crlf: data=data.replace('\n','\r\n')
-        open(path,'wb').write(data.encode('utf-8'))
+    want=set(XNET); tot_n=0; tot_had=0; found=0
+    for path in allfiles:
+        raw,crlf,src=get(path)
+        if not any(re.match(r'^loc_(%s): ;$'%'|'.join(XNET),l) for l in src): continue
+        out=[]; n=0; had=0
+        for i,l in enumerate(src):
+            out.append(l)
+            m=re.match(r'^loc_([0-9A-F]{8}): ;$',l)
+            if m and m.group(1) in want:
+                found+=1
+                if i+1<len(src) and 'sg_xnet_hle' in src[i+1]: had+=1
+                else:
+                    out.append('    { extern int sg_xnet_hle(uint32_t); int hn = sg_xnet_hle(0x%sU); if (hn >= 0) { esp += 4u + (uint32_t)hn; return; } }'%m.group(1)); n+=1
+        tot_n+=n; tot_had+=had
+        if n and not check: save(path,raw,crlf,out); cache.pop(path,None)
+    print('%-34s %-18s %s'%('(xnet rule)','all files','applied %d, already %d (of %d entry points)'%(tot_n,tot_had,len(XNET))))
+    if found<len(XNET): print('  WARNING: only %d of %d XNet entry points found'%(found,len(XNET))); bad+=1
 xnet_rule()
 for pf in sorted(glob.glob(os.path.join(here,'*.patch'))):
     for name,hunks in parse(open(pf,encoding='utf-8',errors='replace').read()):
-        path=os.path.join(gen,name)
-        if not os.path.exists(path): print('MISSING  %s (generate it first)'%path); bad+=1; continue
-        raw=open(path,'rb').read(); crlf=b'\r\n' in raw
-        src=raw.decode('utf-8','replace').replace('\r\n','\n').split('\n')
-        changed=False; res=[]
+        hunks=[h for h in hunks if h]
+        path=locate(name,hunks)
+        if not path: print('%-34s %-18s FAILED (code to patch not found; was the generator run with --all --split 250?)'%(os.path.basename(pf),name)); bad+=1; continue
+        raw,crlf,src=get(path); res=[]; changed=False
         for h in hunks:
+            st=state(src,h)
+            if st=='already': res.append('already'); continue
             old=[x[1:] for x in h if x[0] in ' -']; new=[x[1:] for x in h if x[0] in ' +']
-            if find(src,new)>=0 and old!=new: res.append('already'); continue
-            k=find(src,old)
-            if k<0: res.append('FAILED'); bad+=1; continue
-            src[k:k+len(old)]=new; changed=True; res.append('applied')
-        print('%-28s %-34s %s'%(os.path.basename(pf),name,', '.join(res)))
-        if changed and not check:
-            open(path+'.orig_sg1','wb').write(raw) if not os.path.exists(path+'.orig_sg1') else None
-            data='\n'.join(src)
-            if crlf: data=data.replace('\n','\r\n')
-            open(path,'wb').write(data.encode('utf-8'))
+            k=find(src,old); src[k:k+len(old)]=new; changed=True; res.append('applied')
+        print('%-34s %-18s %s'%(os.path.basename(pf),os.path.basename(path),', '.join(res)))
+        if changed and not check: save(path,raw,crlf,src); cache.pop(path,None)
 sys.exit(1 if bad else 0)
