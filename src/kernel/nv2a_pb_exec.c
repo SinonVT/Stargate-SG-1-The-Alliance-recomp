@@ -2263,6 +2263,24 @@ static int lit_color(uint32_t index, float out[4])
             out[k] += att * (amb[k] + dif[k] * ndl);
         }
     }
+    {   /* SG1: RECOMP_LIGHT_LOG: sample very bright lit vertices (blown-out characters) */
+        static int ll = -1;
+        static unsigned cnt, shown;
+        if (ll < 0) ll = getenv("RECOMP_LIGHT_LOG") != NULL;
+        if (ll && mask != 0 && out[0] + out[1] + out[2] > 2.6f && shown < 30 && (++cnt % 311) == 0) {
+            shown++;
+            fprintf(stderr, "[LITBRT] idx %u mask %08X colmat %08X sceneamb=(%.2f %.2f %.2f) em=(%.2f %.2f %.2f) ma=(%.2f) md=(%.2f) n=(%.2f %.2f %.2f) out=(%.2f %.2f %.2f) tex0 %ux%u fmt %02X\n", index, mask, colmat,
+                    reg_f(0x0A10), reg_f(0x0A14), reg_f(0x0A18), s_sg1_em[0], s_sg1_em[1], s_sg1_em[2], s_sg1_ma[0], s_sg1_md[0], n[0], n[1], n[2], out[0], out[1], out[2],
+                    s_gpu.texs[0].width, s_gpu.texs[0].height, s_gpu.texs[0].color);
+            for (i = 0; i < NV_LIGHTS; i++) {
+                uint32_t kind = (mask >> (2 * i)) & 3, b2 = 0x1000 + (uint32_t)i * 0x80;
+                if (kind)
+                    fprintf(stderr, "[LITBRT]   L%d kind %u amb=(%.2f %.2f %.2f) dif=(%.2f %.2f %.2f) dir=(%.2f %.2f %.2f) pos=(%.1f %.1f %.1f) att=(%.3f %.5f %.7f) range %.1f\n", i, kind,
+                            reg_f(b2), reg_f(b2 + 4), reg_f(b2 + 8), reg_f(b2 + 0x0C), reg_f(b2 + 0x10), reg_f(b2 + 0x14), reg_f(b2 + 0x34), reg_f(b2 + 0x38), reg_f(b2 + 0x3C),
+                            reg_f(b2 + 0x5C), reg_f(b2 + 0x60), reg_f(b2 + 0x64), reg_f(b2 + 0x68), reg_f(b2 + 0x6C), reg_f(b2 + 0x70), reg_f(b2 + 0x24));
+            }
+        }
+    }
     out[3] = s_sg1_alpha;
     if (g_sg1_lightfloor > 0 && (colmat & 3u) == 1u) {   /* SG1 option: lift unlit static meshes (vertex colour is the emission) */
         static const float fl[5] = { 0.0f, 0.06f, 0.12f, 0.20f, 0.30f };
@@ -2675,6 +2693,7 @@ static void backend_flush(int textured)
         tex.addr_v = s_gpu.texs[0].addr_v;
         tex.levels = s_gpu.texs[0].pitch ? 1 : s_gpu.texs[0].levels;
         tex.filter = s_gpu.texs[0].filter;
+        tex.cube = 0; tex.face_stride = 0;
         batch.texture = &tex;
     }
     s_backend->draw(&surf, &batch);
@@ -2690,6 +2709,7 @@ static uint32_t      s_bxn;
 
 static int batch_uses_program(void);
 static void bex_flush_inner(void);
+static uint32_t tex_face_stride(const Texture *t);
 static void bex_flush(void)
 { uint64_t _t0; if (!prof_on()) { bex_flush_inner(); return; } _t0 = xbox_HostNowNs(); bex_flush_inner(); g_p_bex_ns += xbox_HostNowNs() - _t0; }
 static void bex_flush_inner(void)
@@ -2725,6 +2745,8 @@ static void bex_flush_inner(void)
         b.tex[st].addr_v = t->addr_v;
         b.tex[st].levels = t->pitch ? 1 : t->levels;
         b.tex[st].filter = t->filter;
+        b.tex[st].cube = t->cube ? 1u : 0u;
+        b.tex[st].face_stride = t->cube ? tex_face_stride(t) : 0u;
         b.tex_texel_uv[st] = tex_size_from_format(t->color) ? 0u : 1u;
         b.tex_border_on[st] = t->border_color ? 1u : 0u;
         b.tex_border[st] = t->border;
@@ -3700,6 +3722,26 @@ static int transform_vertex(uint32_t index, Nv2aVshOutput *out)
     }
     if (!nv2a_vsh_run((const float (*)[4])in, out))
         return 0;
+    {   /* SG1: RECOMP_LIGHT_LOG: bright vertex-program output (blown-out characters) */
+        static int ll = -1;
+        static unsigned cnt, shown;
+        if (ll < 0) ll = getenv("RECOMP_LIGHT_LOG") != NULL;
+        if (ll && out->d0[0] + out->d0[1] + out->d0[2] > 2.6f && shown < 12 && (++cnt % 4001) == 0) {
+            uint32_t q;
+            shown++;
+            fprintf(stderr, "[VSHBRT] idx %u d0=(%.2f %.2f %.2f %.2f) d1=(%.2f %.2f %.2f) tex0 %ux%u fmt %02X prog %08X in0=(%.1f %.1f %.1f) in2(nrm)=(%.2f %.2f %.2f) in3(col)=(%.2f %.2f %.2f %.2f) in4=(%.2f %.2f %.2f)\n",
+                    index, out->d0[0], out->d0[1], out->d0[2], out->d0[3], out->d1[0], out->d1[1], out->d1[2],
+                    s_gpu.texs[0].width, s_gpu.texs[0].height, s_gpu.texs[0].color, s_gpu.rc.stage_program,
+                    in[0][0], in[0][1], in[0][2], in[2][0], in[2][1], in[2][2], in[3][0], in[3][1], in[3][2], in[3][3], in[4][0], in[4][1], in[4][2]);
+            if (shown <= 3)
+                for (q = 0; q < NV2A_VSH_CONSTANTS; q++) {
+                    const float *cc = nv2a_vsh_constant(q);
+                    if (cc[0] != 0.0f || cc[1] != 0.0f || cc[2] != 0.0f || cc[3] != 0.0f)
+                        fprintf(stderr, "[VSHBRT]   c[%u]=(%.3f %.3f %.3f %.3f)\n", q, cc[0], cc[1], cc[2], cc[3]);
+                }
+            fflush(stderr);
+        }
+    }
     /* oPos.w == 0 comes from a program that never divided by w: x, y and z
      * are already surface units. The hardware draws such a vertex (xemu
      * clamps w away from zero, in front of the eye), but raster_xf_clipped

@@ -87,6 +87,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dxgi
     dxguid
     d3dcompiler
+    windowscodecs
+    ole32
     $<IF:$<BOOL:${MINGW}>,xinput1_4,xinput>   # see src/input/CMakeLists.txt
     winmm
     # Lets the fault handler resolve the host RIP back to the generated

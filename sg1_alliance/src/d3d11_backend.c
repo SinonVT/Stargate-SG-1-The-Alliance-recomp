@@ -46,9 +46,12 @@ static const char g_hlsl[] =
 "    uint4  g_ctl;\n"           /* control stage_program */
 "    float4 g_fogc;\n"
 "    float4 g_tex[4];\n"        /* xy = uv scale, z = valid, w = alpha_one */
+"    float4 g_cube;\n"          /* x..w: stage s samples a cube map */
 "};\n"
 "Texture2D T0 : register(t0); Texture2D T1 : register(t1);\n"
 "Texture2D T2 : register(t2); Texture2D T3 : register(t3);\n"
+"TextureCube C0 : register(t4); TextureCube C1 : register(t5);\n"
+"TextureCube C2 : register(t6); TextureCube C3 : register(t7);\n"
 "SamplerState S0 : register(s0); SamplerState S1 : register(s1);\n"
 "SamplerState S2 : register(s2); SamplerState S3 : register(s3);\n"
 "\n"
@@ -202,7 +205,13 @@ static const char g_hlsl[] =
 "    uint mode = (g_ctl.y >> (st * 5u)) & 31u;\n"
 "    float q = (c.w != 0.0) ? c.w : 1.0;\n"
 "    if (mode == 0u) return float4(0, 0, 0, 1);\n"
-"    if (mode == 3u) return float4(1, 1, 1, 1);   /* cube maps are not sampled: neutral */\n"
+"    if (mode == 3u) {\n"
+"        if (g_cube[st] < 0.5) return float4(1, 1, 1, 1);   /* no cube map available: neutral */\n"
+"        if (st == 0u) return C0.Sample(S0, c.xyz);\n"
+"        if (st == 1u) return C1.Sample(S1, c.xyz);\n"
+"        if (st == 2u) return C2.Sample(S2, c.xyz);\n"
+"        return C3.Sample(S3, c.xyz);\n"
+"    }\n"
 "    if (mode >= 1u && mode <= 3u) {\n"
 "        if (g_tex[st].z < 0.5) return float4(1, 1, 1, 1);\n"
 "        return samp(st, (c.xy / q) * g_tex[st].xy);\n"
@@ -284,6 +293,7 @@ typedef struct {
     uint32_t ctl[4];
     float    fogc[4];
     float    tex[4][4];
+    float    cube[4];
 } Cb;
 
 typedef struct {
@@ -657,11 +667,12 @@ static int g_dbg_hide;                   /* debug: hide one class of draws (by b
 static int g_dbg_tex, g_dbg_log;         /* debug: dump decoded textures to texdump\\, verbose draw logging (both default off) */
 static struct { uint32_t off, fmt, w, h, lv, flt, draws, tris; double area; float uvspan; uint32_t t1f, t1w, t1h, t2f, t2w, prog, nst, fin0, fin1, ocw0, icw0, uvs1, tv; } g_ta[96];
 static int g_ta_n;
+extern int g_sg1_hdpack;
+int g_sg1_cube = 1;   /* Debug menu: sample cube maps (off = neutral white, the old behaviour) */
 static struct { float z; int have; uint32_t off, fmt, w, h, lv, t1f, t1w, t1h, prog; float u, v, density, uvmax; int blend; uint32_t n; } g_pk[3];
 static int g_haze = 1;                   /* heat-haze / refraction texture shaders (0 = skip those draws) */
 static volatile int g_req_flush, g_req_res;
-static int g_upscale = -1;               /* menu/cfg value (1 = 2x upscale on load) */
-static int g_up_active;                  /* snapshot used by tex_upload; only changes when textures are flushed */
+int g_sg1_custom = 1;                    /* Debug/menu: load user textures from texpack\custom */
 static void settings_init(void)
 {
     const char *e;
@@ -676,6 +687,9 @@ static void settings_init(void)
     g_sg1_gamma_on = sg1_cfg_int("gamma_ramp", 1) ? 1 : 0;
     g_sg1_lightfloor = sg1_cfg_int("light_floor", 0);
     g_sg1_texmat = sg1_cfg_int("texmat", 1) ? 1 : 0;
+    g_sg1_cube = sg1_cfg_int("cubemaps", 1) ? 1 : 0;
+    g_sg1_hdpack = sg1_cfg_int("hdpack", 1) ? 1 : 0;
+    g_sg1_custom = sg1_cfg_int("customtex", 1) ? 1 : 0;
     if (g_sg1_lightfloor < 0 || g_sg1_lightfloor > 4) g_sg1_lightfloor = 0;
     e = getenv("RECOMP_DEBUG_TEXDUMP");
     g_dbg_tex = e ? !(e[0] == '0') : sg1_cfg_int("dbg_texdump", 0) != 0;
@@ -683,12 +697,6 @@ static void settings_init(void)
     g_dbg_log = e ? !(e[0] == '0') : sg1_cfg_int("dbg_logs", 0) != 0;
     e = getenv("RECOMP_HAZE");
     g_haze = e ? !(e[0] == '0') : sg1_cfg_int("haze", 1) != 0;
-    e = getenv("RECOMP_UPSCALE");     /* 0 = off, 1 = 2x, 2 = 4x, 3 = 8x (a plain 2 / 4 / 8 is accepted too) */
-    g_upscale = e ? atoi(e) : sg1_cfg_int("upscale", 1);
-    if (g_upscale == 2 && e) g_upscale = 1; else if (g_upscale == 4 && e) g_upscale = 2; else if (g_upscale == 8 && e) g_upscale = 3;
-    if (g_upscale < 0) g_upscale = 0;
-    if (g_upscale > 3) g_upscale = 3;
-    g_up_active = g_upscale;
 }
 
 static int tex_want_mips(void)
@@ -697,69 +705,142 @@ static int tex_want_mips(void)
     return g_mips;
 }
 
-/* 2x upscale: separable Catmull-Rom (output pixel 2i samples source i-0.25, 2i+1 samples i+0.25) + mild RGB sharpen */
-static uint32_t *tex_up2(const uint32_t *src, int w, int h, int sharpen)
+
+
+/* ---- SG1: HD texture pack. Dump: texpack\dump\<id>.png ; Replace: texpack\<id>.png (any size, PNG). id = f<fmt>_<w>x<h>_<hash> ---- */
+#include <wincodec.h>
+#include <objbase.h>
+static const GUID sg1_CLSID_WICFactory = {0xcacaf262,0x9370,0x4615,{0xa1,0x3b,0x9f,0x55,0x39,0xda,0x4c,0x0a}};
+static const GUID sg1_IID_WICFactory   = {0xec5ec8a9,0xc395,0x4314,{0x9c,0x77,0x54,0xd7,0xa9,0x35,0xff,0x70}};
+static const GUID sg1_PF_BGRA          = {0x6fddc324,0x4e03,0x4bfe,{0xb1,0x85,0x3d,0x77,0x76,0x8d,0xc9,0x0f}};
+int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
+static unsigned g_hd_loaded;
+
+static uint32_t hd_crc_tab[256]; static int hd_crc_init;
+static uint32_t hd_crc(uint32_t c, const unsigned char *p, size_t n)
 {
-    static const float wa[4] = { -0.0234375f, 0.2265625f, 0.8671875f, -0.0703125f };   /* frac .75 */
-    static const float wb[4] = { -0.0703125f, 0.8671875f, 0.2265625f, -0.0234375f };   /* frac .25 */
-    int W = w * 2, H = h * 2, x, y, c, k;
-    float *tmp = (float *)malloc((size_t)W * h * 4 * sizeof(float));
-    uint32_t *dst = (uint32_t *)malloc((size_t)W * H * 4);
-    uint32_t *sh;
-    if (!tmp || !dst) { free(tmp); free(dst); return NULL; }
+    size_t i;
+    if (!hd_crc_init) { uint32_t k, j, v; for (k = 0; k < 256; k++) { v = k; for (j = 0; j < 8; j++) v = (v & 1) ? 0xEDB88320u ^ (v >> 1) : v >> 1; hd_crc_tab[k] = v; } hd_crc_init = 1; }
+    c = ~c;
+    for (i = 0; i < n; i++) c = hd_crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
+    return ~c;
+}
+static void hd_be32(unsigned char *p, uint32_t v) { p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16); p[2] = (unsigned char)(v >> 8); p[3] = (unsigned char)v; }
+static void hd_chunk(FILE *f, const char *type, const unsigned char *d, uint32_t n)
+{
+    unsigned char h[8]; uint32_t c;
+    hd_be32(h, n); memcpy(h + 4, type, 4);
+    fwrite(h, 1, 8, f);
+    if (n) fwrite(d, 1, n, f);
+    c = hd_crc(0, (const unsigned char *)type, 4);
+    if (n) { /* continue crc over data */
+        uint32_t x = ~c; size_t i; for (i = 0; i < n; i++) x = hd_crc_tab[(x ^ d[i]) & 255] ^ (x >> 8); c = ~x;
+    }
+    hd_be32(h, c); fwrite(h, 1, 4, f);
+}
+/* px = BGRA (as decoded), writes an RGBA PNG using stored (uncompressed) deflate blocks */
+static int hd_write_png(const char *fn, const uint32_t *px, uint32_t w, uint32_t h)
+{
+    size_t rowb = (size_t)w * 4 + 1, rawn = rowb * h, i, pos = 0;
+    unsigned char *raw = (unsigned char *)malloc(rawn), *z; size_t zn, zp = 2;
+    uint32_t a = 1, b = 0, y, x; unsigned char ih[13]; FILE *f;
+    if (!raw) return 0;
     for (y = 0; y < h; y++) {
-        const uint32_t *row = src + (size_t)y * w;
-        for (x = 0; x < w; x++) {
-            for (k = 0; k < 2; k++) {
-                const float *wt = k ? wb : wa;
-                int base = k ? x - 1 : x - 2;
-                float *o = tmp + ((size_t)y * W + x * 2 + k) * 4;
-                for (c = 0; c < 4; c++) {
-                    float a = 0; int j;
-                    for (j = 0; j < 4; j++) {
-                        int xx = base + j; if (xx < 0) xx = 0; if (xx >= w) xx = w - 1;
-                        a += wt[j] * (float)((row[xx] >> (c * 8)) & 255);
-                    }
-                    o[c] = a;
-                }
-            }
+        unsigned char *r = raw + y * rowb; r[0] = 0;
+        for (x = 0; x < w; x++) { uint32_t v = px[(size_t)y * w + x]; r[1 + x * 4] = (unsigned char)(v >> 16); r[2 + x * 4] = (unsigned char)(v >> 8); r[3 + x * 4] = (unsigned char)v; r[4 + x * 4] = (unsigned char)(v >> 24); }
+    }
+    zn = 2 + rawn + ((rawn + 65534) / 65535) * 5 + 4 + 8;
+    z = (unsigned char *)malloc(zn);
+    if (!z) { free(raw); return 0; }
+    z[0] = 0x78; z[1] = 0x01;
+    while (pos < rawn) {
+        size_t n = rawn - pos > 65535 ? 65535 : rawn - pos;
+        z[zp++] = (pos + n >= rawn) ? 1 : 0; z[zp++] = (unsigned char)n; z[zp++] = (unsigned char)(n >> 8); z[zp++] = (unsigned char)~n; z[zp++] = (unsigned char)(~n >> 8);
+        memcpy(z + zp, raw + pos, n); zp += n; pos += n;
+    }
+    for (i = 0; i < rawn; i++) { a = (a + raw[i]) % 65521u; b = (b + a) % 65521u; }
+    hd_be32(z + zp, (b << 16) | a); zp += 4;
+    f = fopen(fn, "wb");
+    if (!f) { free(raw); free(z); return 0; }
+    fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
+    hd_be32(ih, w); hd_be32(ih + 4, h); ih[8] = 8; ih[9] = 6; ih[10] = 0; ih[11] = 0; ih[12] = 0;
+    hd_chunk(f, "IHDR", ih, 13); hd_chunk(f, "IDAT", z, (uint32_t)zp); hd_chunk(f, "IEND", NULL, 0);
+    fclose(f); free(raw); free(z);
+    return 1;
+}
+/* returns malloc'd BGRA pixels or NULL */
+static uint32_t *hd_load_png(const char *path, uint32_t *ow, uint32_t *oh)
+{
+    WCHAR wp[MAX_PATH]; IWICImagingFactory *fac = NULL; IWICBitmapDecoder *dec = NULL; IWICBitmapFrameDecode *fr = NULL; IWICFormatConverter *cv = NULL;
+    UINT w = 0, h = 0; uint32_t *buf = NULL; int ok = 0;
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) return NULL;
+    MultiByteToWideChar(CP_ACP, 0, path, -1, wp, MAX_PATH);
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(CoCreateInstance(&sg1_CLSID_WICFactory, NULL, CLSCTX_INPROC_SERVER, &sg1_IID_WICFactory, (void **)&fac))) return NULL;
+    if (SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename(fac, wp, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec))
+        && SUCCEEDED(IWICBitmapDecoder_GetFrame(dec, 0, &fr))
+        && SUCCEEDED(IWICImagingFactory_CreateFormatConverter(fac, &cv))
+        && SUCCEEDED(IWICFormatConverter_Initialize(cv, (IWICBitmapSource *)fr, &sg1_PF_BGRA, WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom))
+        && SUCCEEDED(IWICBitmapSource_GetSize((IWICBitmapSource *)cv, &w, &h)) && w >= 1 && h >= 1 && w <= 4096 && h <= 4096) {
+        buf = (uint32_t *)malloc((size_t)w * h * 4);
+        if (buf && SUCCEEDED(IWICBitmapSource_CopyPixels((IWICBitmapSource *)cv, NULL, w * 4, w * h * 4, (BYTE *)buf))) ok = 1;
+    }
+    if (cv) IUnknown_Release((IUnknown *)cv);
+    if (fr) IUnknown_Release((IUnknown *)fr);
+    if (dec) IUnknown_Release((IUnknown *)dec);
+    IUnknown_Release((IUnknown *)fac);
+    if (!ok) { free(buf); return NULL; }
+    *ow = w; *oh = h;
+    return buf;
+}
+typedef struct { uint64_t hash; uint32_t code, w, h; char *file; } HdEnt;
+static HdEnt *g_hd_ent; static int g_hd_nent, g_hd_idx_done;
+static int hd_cmp(const void *a, const void *b)
+{
+    const HdEnt *x = (const HdEnt *)a, *y = (const HdEnt *)b;
+    return x->hash < y->hash ? -1 : x->hash > y->hash ? 1 : 0;
+}
+static void hd_index_load(void)
+{   /* texpack\index.txt: "f<fmt>_<w>x<h>_<hash> <file relative to texpack>" per line (built by tools\make_hdpack.py --all) */
+    FILE *f; char line[320]; int cap = 0;
+    g_hd_idx_done = 1;
+    f = fopen("texpack\\index.txt", "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        unsigned code, w, h; unsigned long long hs; char fn[260];
+        if (sscanf(line, "f%X_%ux%u_%llX %259s", &code, &w, &h, &hs, fn) != 5) continue;
+        if (g_hd_nent == cap) { cap = cap ? cap * 2 : 4096; g_hd_ent = (HdEnt *)realloc(g_hd_ent, cap * sizeof(HdEnt)); if (!g_hd_ent) { g_hd_nent = 0; break; } }
+        g_hd_ent[g_hd_nent].hash = hs; g_hd_ent[g_hd_nent].code = code; g_hd_ent[g_hd_nent].w = w; g_hd_ent[g_hd_nent].h = h;
+        g_hd_ent[g_hd_nent].file = _strdup(fn); g_hd_nent++;
+    }
+    fclose(f);
+    if (g_hd_nent) qsort(g_hd_ent, g_hd_nent, sizeof(HdEnt), hd_cmp);
+    fprintf(stderr, "[HDPACK] index: %d entries\n", g_hd_nent);
+}
+static const char *hd_index_find(uint32_t code, uint32_t w, uint32_t h, uint64_t hash)
+{
+    int lo = 0, hi = g_hd_nent - 1;
+    if (!g_hd_idx_done) hd_index_load();
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (g_hd_ent[mid].hash < hash) lo = mid + 1; else if (g_hd_ent[mid].hash > hash) hi = mid - 1;
+        else {
+            int i = mid;
+            while (i > 0 && g_hd_ent[i - 1].hash == hash) i--;
+            for (; i < g_hd_nent && g_hd_ent[i].hash == hash; i++)
+                if (g_hd_ent[i].code == code && g_hd_ent[i].w == w && g_hd_ent[i].h == h) return g_hd_ent[i].file;
+            return NULL;
         }
     }
-    for (y = 0; y < h; y++) for (k = 0; k < 2; k++) {
-        const float *wt = k ? wb : wa;
-        int base = k ? y - 1 : y - 2;
-        for (x = 0; x < W; x++) {
-            uint32_t v = 0;
-            for (c = 0; c < 4; c++) {
-                float a = 0; int j;
-                for (j = 0; j < 4; j++) {
-                    int yy = base + j; if (yy < 0) yy = 0; if (yy >= h) yy = h - 1;
-                    a += wt[j] * tmp[((size_t)yy * W + x) * 4 + c];
-                }
-                if (a < 0) a = 0; if (a > 255) a = 255;
-                v |= (uint32_t)(a + 0.5f) << (c * 8);
-            }
-            dst[(size_t)(y * 2 + k) * W + x] = v;
-        }
-    }
-    free(tmp);
-    if (!sharpen) return dst;
-    sh = (uint32_t *)malloc((size_t)W * H * 4);
-    if (!sh) return dst;
-    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
-        uint32_t v = dst[(size_t)y * W + x], o = v & 0xFF000000u;
-        const uint32_t n[4] = { dst[(size_t)y * W + (x > 0 ? x - 1 : x)], dst[(size_t)y * W + (x < W - 1 ? x + 1 : x)],
-                                dst[(size_t)(y > 0 ? y - 1 : y) * W + x], dst[(size_t)(y < H - 1 ? y + 1 : y) * W + x] };
-        for (c = 0; c < 3; c++) {
-            float a = 1.8f * (float)((v >> (c * 8)) & 255);
-            for (k = 0; k < 4; k++) a -= 0.2f * (float)((n[k] >> (c * 8)) & 255);
-            if (a < 0) a = 0; if (a > 255) a = 255;
-            o |= (uint32_t)(a + 0.5f) << (c * 8);
-        }
-        sh[(size_t)y * W + x] = o;
-    }
-    free(dst);
-    return sh;
+    return NULL;
+}
+static int hd_eligible(const Tex *e, const Nv2aTexture *t)
+{
+    return !e->texel_uv && (t->color == 0x06 || t->color == 0x0C || t->color == 0x0E || t->color == 0x0F) && t->width >= 16 && t->height >= 16;
+}
+static void hd_id(char *b, size_t n, const Tex *e, const Nv2aTexture *t)
+{
+    snprintf(b, n, "f%02X_%ux%u_%016llX", t->color, t->width, t->height, (unsigned long long)e->hash);
 }
 
 static int tex_upload(Tex *e, const Nv2aTexture *t)
@@ -820,16 +901,30 @@ static int tex_upload(Tex *e, const Nv2aTexture *t)
         free(px);
         return 0;
     }
-    if (g_up_active && t->width >= 4 && t->height >= 4 && (size_t)t->width * t->height <= 262144) {
-        /* each pass doubles; stop at the requested level or when the result would pass 2048x2048 / 4M pixels */
-        int pass;
-        for (pass = 0; pass < g_up_active; pass++) {
-            uint32_t nw = uw * 2, nh = uh * 2;
-            uint32_t *up;
-            if (nw > 4096 || nh > 4096 || (size_t)nw * nh > 4194304u) break;
-            up = tex_up2(px, (int)uw, (int)uh, pass == g_up_active - 1 || (nw * 2 > 4096 || nh * 2 > 4096 || (size_t)nw * 2 * nh * 2 > 4194304u));
-            if (!up) break;
-            free(px); px = up; uw = nw; uh = nh;
+    if (ok && (g_sg1_hdpack || g_sg1_custom) && hd_eligible(e, t)) {   /* SG1: HD texture pack (originals from the .utx packages) + user textures */
+        char fn[260]; uint32_t rw2 = 0, rh2 = 0, *rp;
+        const char *ix = hd_index_find(t->color, t->width, t->height, e->hash);
+        if (ix) {
+            const char *base = strrchr(ix, '/');
+            base = base ? base + 1 : ix;
+            if (g_sg1_custom) {      /* user's own version: texpack\custom\<same file name as in texpack\hd> */
+                snprintf(fn, sizeof fn, "texpack\\custom\\%s", base);
+                rp = hd_load_png(fn, &rw2, &rh2);
+                if (rp) { free(px); px = rp; uw = rw2; uh = rh2; g_hd_loaded++; ix = NULL; }
+            }
+            if (ix && g_sg1_hdpack) {
+                snprintf(fn, sizeof fn, "texpack\\%s", ix);
+                rp = hd_load_png(fn, &rw2, &rh2);
+                if (rp) { free(px); px = rp; uw = rw2; uh = rh2; g_hd_loaded++; }
+            }
+        }
+    }
+    if (e->tex) {
+        D3D11_TEXTURE2D_DESC od;
+        ID3D11Texture2D_GetDesc(e->tex, &od);
+        if (od.Width != uw || od.Height != uh) {
+            if (e->srv) { ID3D11ShaderResourceView_Release(e->srv); e->srv = NULL; }
+            ID3D11Texture2D_Release(e->tex); e->tex = NULL; e->mips = 0;
         }
     }
     if (!e->tex) {
@@ -867,6 +962,65 @@ static int tex_upload(Tex *e, const Nv2aTexture *t)
     free(px);
     g_st_texup++;
     return 1;
+}
+
+/* ---- SG1: cube maps (lighting / environment cubes on the characters' upper stages) ---- */
+typedef struct { uint32_t offset, w, h, color, stride; uint64_t hash, checked, last_use; ID3D11Texture2D *tex; ID3D11ShaderResourceView *srv; } CubeTex;
+static CubeTex g_cubes[24];
+
+static ID3D11ShaderResourceView *cube_srv(const Nv2aTexture *t)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    CubeTex *e = NULL;
+    int i, victim = 0, f;
+    uint64_t hsh;
+    if (!g_sg1_cube || !t->cube || !t->face_stride || t->width == 0 || t->width > 512 || t->height == 0 || t->height > 512) return NULL;
+    hsh = hash_bytes(mem + t->offset, (size_t)t->face_stride * 6u);
+    for (i = 0; i < 24; i++)
+        if (g_cubes[i].srv && g_cubes[i].offset == t->offset && g_cubes[i].w == t->width && g_cubes[i].h == t->height
+                && g_cubes[i].color == t->color && g_cubes[i].stride == t->face_stride) { e = &g_cubes[i]; break; }
+    if (e && e->hash == hsh) { e->last_use = g_frame; return e->srv; }
+    if (!e) {
+        for (i = 0; i < 24; i++) {
+            if (!g_cubes[i].srv) { victim = i; break; }
+            if (g_cubes[i].last_use < g_cubes[victim].last_use) victim = i;
+        }
+        e = &g_cubes[victim];
+    }
+    {
+        D3D11_TEXTURE2D_DESC td;
+        D3D11_SUBRESOURCE_DATA sd[6];
+        uint32_t *px[6];
+        ID3D11Texture2D *tx = NULL;
+        ID3D11ShaderResourceView *sv = NULL;
+        int ok = 1;
+        for (f = 0; f < 6; f++) px[f] = NULL;
+        for (f = 0; f < 6 && ok; f++) {
+            Nv2aTexture ft = *t;
+            ft.offset = t->offset + (uint32_t)f * t->face_stride;
+            ft.cube = 0; ft.face_stride = 0; ft.levels = 1;
+            px[f] = (uint32_t *)malloc((size_t)t->width * t->height * 4);
+            if (!px[f] || !nv2a_backend_decode_texture(&ft, px[f])) ok = 0;
+            sd[f].pSysMem = px[f]; sd[f].SysMemPitch = t->width * 4; sd[f].SysMemSlicePitch = 0;
+        }
+        if (ok) {
+            memset(&td, 0, sizeof td);
+            td.Width = t->width; td.Height = t->height; td.MipLevels = 1; td.ArraySize = 6;
+            td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE; td.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+            if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, sd, &tx)))
+                ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)tx, NULL, &sv);
+        }
+        for (f = 0; f < 6; f++) free(px[f]);
+        if (!sv) { if (tx) ID3D11Texture2D_Release(tx); return NULL; }
+        if (e->srv) ID3D11ShaderResourceView_Release(e->srv);
+        if (e->tex) ID3D11Texture2D_Release(e->tex);
+        e->tex = tx; e->srv = sv;
+        e->offset = t->offset; e->w = t->width; e->h = t->height; e->color = t->color; e->stride = t->face_stride; e->hash = hsh;
+        e->last_use = g_frame;
+        if (g_dbg_log) fprintf(stderr, "[CUBE] created %ux%u fmt %02X face_stride %u off %08X\n", t->width, t->height, t->color, t->face_stride, t->offset);
+    }
+    return e->srv;
 }
 
 /* The SRV for a texture stage. `cur` is the render target being drawn into
@@ -1232,6 +1386,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
     Cb cb;
     D3D11_MAPPED_SUBRESOURCE m;
     ID3D11ShaderResourceView *srv[4];
+    ID3D11ShaderResourceView *csrv[4] = { NULL, NULL, NULL, NULL };
     ID3D11SamplerState *smp[4];
     ID3D11RenderTargetView *rtv;
     D3D11_VIEWPORT vp;
@@ -1318,6 +1473,10 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
             need = (st == 0);
         srv[st] = g_white;
         smp[st] = NULL;
+        if (b->use_rc && t->cube && b->tex_valid[st] && ((b->rc.stage_program >> (st * 5)) & 0x1Fu) == 3u) {
+            csrv[st] = cube_srv(t);
+            if (csrv[st]) cb.cube[st] = 1.0f;
+        }
         cb.tex[st][0] = cb.tex[st][1] = 1.0f;
         if (need && b->tex_valid[st]) {
             srv[st] = tex_srv(t, b->tex_texel_uv[st], r, &alpha1, &rthit);
@@ -1392,6 +1551,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
     ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_cb);
     ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_cb);
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 4, srv);
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 4, 4, csrv);
     ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 4, smp);
     {   /* SG1 debug: F6/F7/F8 hide one blend class of effect draws */
         int skip = 0;
@@ -1815,7 +1975,11 @@ static void bm_text(int item, char *b, int n)
         else snprintf(b, n, "Anisotropic filter  < %dx >", g_aniso);
     } else if (item == 2)
         snprintf(b, n, "Mipmaps             < %s >", g_mips ? "on" : "off");
-    else if (item == 11) {
+    else if (item == 13)
+        snprintf(b, n, "HD texture pack     < %s >", g_sg1_hdpack ? "on" : "off");
+    else if (item == 12) {
+        snprintf(b, n, "Cube map lighting   < %s >", g_sg1_cube ? "on" : "off");
+    } else if (item == 11) {
         snprintf(b, n, "Floor texgen fix    < %s >", g_sg1_texmat ? "on" : "off");
     } else if (item == 10) {
         static const char *ln[5] = { "off", "low", "medium", "high", "max" };
@@ -1834,7 +1998,7 @@ static void bm_text(int item, char *b, int n)
     else if (item == 4)
         snprintf(b, n, "Heat haze           < %s >", g_haze ? "on" : "off");
     else if (item == 3)
-        snprintf(b, n, "Texture upscale     < %s >", g_upscale == 0 ? "off" : g_upscale == 1 ? "2x" : g_upscale == 2 ? "4x" : "8x (max)");
+        snprintf(b, n, "Custom textures    < %s >", g_sg1_custom ? "on" : "off");
     else b[0] = 0;
 }
 static void bm_change(int item, int dir)
@@ -1856,6 +2020,13 @@ static void bm_change(int item, int dir)
         g_mips = !g_mips;
         sg1_cfg_set("mips", g_mips ? "1" : "0");
         g_req_flush = 1;
+    } else if (item == 13) {
+        g_sg1_hdpack = !g_sg1_hdpack;
+        sg1_cfg_set("hdpack", g_sg1_hdpack ? "1" : "0");
+        g_req_flush = 1;
+    } else if (item == 12) {
+        g_sg1_cube = !g_sg1_cube;
+        sg1_cfg_set("cubemaps", g_sg1_cube ? "1" : "0");
     } else if (item == 11) {
         g_sg1_texmat = !g_sg1_texmat;
         sg1_cfg_set("texmat", g_sg1_texmat ? "1" : "0");
@@ -1884,15 +2055,9 @@ static void bm_change(int item, int dir)
         g_haze = !g_haze;
         sg1_cfg_set("haze", g_haze ? "1" : "0");
     } else if (item == 3) {
-        int nu = g_upscale + (dir > 0 ? 1 : -1);
-        if (nu < 0) nu = 0;
-        if (nu > 3) nu = 3;
-        if (nu != g_upscale) {
-            g_upscale = nu;
-            snprintf(v, sizeof v, "%d", g_upscale);
-            sg1_cfg_set("upscale", v);
-            g_req_flush = 1;
-        }
+        g_sg1_custom = !g_sg1_custom;
+        sg1_cfg_set("customtex", g_sg1_custom ? "1" : "0");
+        g_req_flush = 1;
     }
 }
 
@@ -2007,7 +2172,6 @@ static void be_flip(void)
         if (g_req_flush) {      /* mipmaps toggled: drop every uploaded texture so they are rebuilt */
             int ti;
             g_req_flush = 0;
-            g_up_active = g_upscale;
             for (ti = 0; ti < MAX_TEX; ti++) {
                 if (g_tex[ti].srv) ID3D11ShaderResourceView_Release(g_tex[ti].srv);
                 if (g_tex[ti].tex) ID3D11Texture2D_Release(g_tex[ti].tex);
@@ -2039,6 +2203,6 @@ void sg1_gpu_backend_install(void)
     extern int (*xbox_fb_hires_hook)(uint32_t, const uint32_t **, uint32_t *, uint32_t *);
     nv2a_backend_register_ex(&g_backend);
     xbox_fb_hires_hook = sg1_hires_grab;
-    g_sg1_bm_count = 12; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
+    g_sg1_bm_count = 14; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
     fprintf(stderr, "[GPU11] D3D11 back end registered\n");
 }

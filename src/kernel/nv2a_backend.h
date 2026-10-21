@@ -51,6 +51,7 @@ typedef struct {
      * a linear texture) and the raw SET_TEXTURE_FILTER word (MIN in bits
      * 16-23). A back end that ignores them samples level 0. */
     uint32_t levels, filter;
+    uint32_t cube, face_stride;     /* SG1: six faces (cube map); bytes between faces */
 } Nv2aTexture;
 
 typedef struct {
