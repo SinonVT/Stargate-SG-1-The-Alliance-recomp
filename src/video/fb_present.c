@@ -271,6 +271,8 @@ extern float mkb_scale_get(void);
 extern void mkb_scale_mul(float f);
 extern int g_mkb_invert_y;
 extern void mkb_invert_y_toggle(void);
+extern int sg1_controllers_on(void);
+extern void sg1_controllers_toggle(void);
 /* backend (d3d11_backend.c) items: resolution, anisotropy, mipmaps */
 int g_sg1_bm_count;
 void (*g_sg1_bm_text)(int item, char *buf, int n);
@@ -285,13 +287,14 @@ static int mn_key_edge(int vk, int *prev)
     return e;
 }
 
-static int mn_items(void) { return 2 + g_sg1_bm_count; }
+static int mn_items(void) { return 3 + g_sg1_bm_count; }
 
 static void mn_text(int i, char *b, int n)
 {
     if (i == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
     else if (i == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
-    else if (g_sg1_bm_text) g_sg1_bm_text(i - 2, b, n);
+    else if (i == 2) snprintf(b, n, "Game controllers    < %s >", sg1_controllers_on() ? "on" : "off");
+    else if (g_sg1_bm_text) g_sg1_bm_text(i - 3, b, n);
     else b[0] = 0;
 }
 
@@ -299,7 +302,8 @@ static void mn_change(int i, int dir)
 {
     if (i == 0) mkb_scale_mul(dir > 0 ? 1.25f : 1.0f / 1.25f);
     else if (i == 1) mkb_invert_y_toggle();
-    else if (g_sg1_bm_change) g_sg1_bm_change(i - 2, dir);
+    else if (i == 2) sg1_controllers_toggle();
+    else if (g_sg1_bm_change) g_sg1_bm_change(i - 3, dir);
 }
 
 static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)

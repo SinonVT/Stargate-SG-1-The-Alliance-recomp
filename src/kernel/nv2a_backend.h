@@ -142,6 +142,8 @@ typedef struct {
     uint32_t final_c0, final_c1;
     uint32_t control;
     uint32_t stage_program;               /* 5 bits per stage */
+    uint32_t dot_mapping;                 /* 0x1E74: 4 bits per stage, stage 1 in bits 3:0 */
+    uint32_t stage_input;                 /* 0x1E78 */
 } Nv2aRcWords;
 
 typedef struct {

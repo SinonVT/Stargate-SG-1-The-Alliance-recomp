@@ -27,6 +27,8 @@ typedef struct {
     uint32_t final_c0, final_c1;            /* SET_SPECULAR_FOG_FACTOR */
     uint32_t control;                       /* SET_COMBINER_CONTROL */
     uint32_t stage_program;                 /* SET_SHADER_STAGE_PROGRAM */
+    uint32_t dot_mapping;                   /* SET_DOT_RGBMAPPING (0x1E74) */
+    uint32_t stage_input;                   /* SET_SHADER_OTHER_STAGE_INPUT (0x1E78) */
 } Nv2aCombiner;
 
 /* One pixel. Colours are r,g,b,a in [0,1]; `fog` is (fog colour, factor).

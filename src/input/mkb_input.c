@@ -142,6 +142,28 @@ static volatile LONG s_gdx, s_gdy;   /* gameplay (native mouse-look) copy */
 static volatile LONG s_mdx, s_mdy, s_mlvl, s_mrlvl;   /* menu-side copy, never cleared by aim */
 static volatile LONG s_mouse_btn;    /* 1 L, 2 R, 4 M, 8 X1, 16 X2    */
 static volatile unsigned char s_vk_down[256];
+/* SG1: the game reads the (emulated) pad only about once per frame, so a quick tap of a key can start
+ * and end between two reads and is never seen. Remember when each key went down and report it as
+ * held for a minimum time (RECOMP_KEY_HOLD_MS, default 90 ms). Long presses are unaffected. */
+static volatile LONGLONG s_vk_t[256];
+extern int mkb_text_mode(void);
+static int mk_held(unsigned k)
+{
+    static LONGLONG hold_ticks;
+    LARGE_INTEGER now;
+    if (k >= 256) return 0;
+    if (s_vk_down[k]) return 1;
+    if (!s_vk_t[k]) return 0;
+    if (!hold_ticks) {
+        LARGE_INTEGER f; const char *e = getenv("RECOMP_KEY_HOLD_MS");
+        long ms = e ? atol(e) : 90;
+        QueryPerformanceFrequency(&f);
+        hold_ticks = f.QuadPart * (ms < 0 ? 0 : ms) / 1000;
+        if (!hold_ticks) hold_ticks = 1;
+    }
+    QueryPerformanceCounter(&now);
+    return (now.QuadPart - s_vk_t[k]) < hold_ticks;
+}
 
 static volatile LONG s_active = 1;   /* F9 toggles this               */
 static volatile LONG s_thread_up;
@@ -277,8 +299,10 @@ static void mkb_handle_raw(HRAWINPUT h)
             kq_push(vk, dn, rep, ch);
         }
         if (vk && vk < 256) {
-            if (k->Message == WM_KEYDOWN || k->Message == WM_SYSKEYDOWN)
+            if (k->Message == WM_KEYDOWN || k->Message == WM_SYSKEYDOWN) {
+                if (!s_vk_down[vk] && !mkb_text_mode()) { LARGE_INTEGER q; QueryPerformanceCounter(&q); s_vk_t[vk] = q.QuadPart; }
                 s_vk_down[vk] = 1;
+            }
             else
                 s_vk_down[vk] = 0;
         }
@@ -442,7 +466,7 @@ static void mkb_aim_vector(double ax, double ay, SHORT *out_x, SHORT *out_y)
     *out_y = (SHORT)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
 }
 
-#define MK_VK(k)  (!mkb_txt && (unsigned)(k) < 256 && s_vk_down[(k)] && !s_blk[(k)])
+#define MK_VK(k)  (!mkb_txt && (unsigned)(k) < 256 && mk_held((unsigned)(k)) && !s_blk[(k)])
 
 
 /* Menu cursor feed: mouse counts since the last call and the left button
@@ -545,6 +569,23 @@ void mkb_scale_mul(float f)
     sg1_cfg_set("mouse_scale", b);
     fprintf(stderr, "[MKB] native mouse scale %.2f\n", (double)v);
 }
+/* SG1: real game controllers on/off (menu item). Off = XInput pads are ignored and the keyboard and
+ * mouse are the only input, so a pad cannot overlap them. RECOMP_CONTROLLERS=0/1 overrides. */
+static int s_ctl_on = -1;
+int sg1_controllers_on(void)
+{
+    if (s_ctl_on < 0) {
+        const char *e = getenv("RECOMP_CONTROLLERS");
+        s_ctl_on = e ? !(e[0] == '0') : (sg1_cfg_int("controllers", 1) != 0);
+    }
+    return s_ctl_on;
+}
+void sg1_controllers_toggle(void)
+{
+    s_ctl_on = !sg1_controllers_on();
+    sg1_cfg_set("controllers", s_ctl_on ? "1" : "0");
+}
+
 void mkb_invert_y_toggle(void)
 {
     mkb_scale_get();

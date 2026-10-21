@@ -88,6 +88,7 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
         return ERROR_DEVICE_NOT_CONNECTED;
 
     result = XInputGetState(dwPort, &xi_state);
+    { extern int sg1_controllers_on(void); if (!sg1_controllers_on()) result = ERROR_DEVICE_NOT_CONNECTED; }   /* SG1: menu switch */
     if (result != ERROR_SUCCESS) {
         g_controller_connected[dwPort] = FALSE;
         if (dwPort == 0) {

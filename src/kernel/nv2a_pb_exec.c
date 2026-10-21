@@ -2276,6 +2276,110 @@ static int lit_color(uint32_t index, float out[4])
     return 1;
 }
 
+/* SG1: fixed-function texture-coordinate generation + texture matrices (after xemu's vsh-ff.c).
+ * Applied per stage only where the title supplied no coordinate stream of its own (the attribute
+ * has no elements), which is what a projected shadow's fade/normal stages look like.
+ * Registers: TEXGEN S/T/R/Q at 0x03C0 + 16*stage + 4*comp; planes at 0x06C0 + 0x40*stage + 16*comp;
+ * texture-matrix enable at 0x0420 + 4*stage; texture matrix at 0x0840 + 0x40*stage; model-view 0x0480,
+ * inverse model-view 0x0580. RECOMP_TEXGEN=0 turns it off. */
+int g_sg1_tg0 = 1;   /* 0 off, 1 planes projective, 2 planes plain: set from the Insert menu */
+static void ffp_texgen(uint32_t index, const float in[4], Nv2aVshOutput *out)
+{
+    static int on = -1;
+    float tp[4], nrm[4], ne[3], u[3], r[3];
+    int have_n = 0, have_tp = 0, st, j, k;
+
+    if (on < 0) { const char *e = getenv("RECOMP_TEXGEN"); on = !(e && e[0] == '0'); }
+    if (!on)
+        return;
+    for (st = 0; st < 4; st++) {
+        float v[4];
+        int any = 0;
+        if (st == 0 && s_gpu.attr[9].size && s_gpu.rc.stage_program == 0xC21u) {   /* experiment: stage 0 from the planes (RECOMP_TEXGEN0=1: S,T,Q projective; =2: S,T,R,1) */
+            int m0 = g_sg1_tg0;
+            if (m0 && s_reg[0x3C0 / 4] == 0x2400u) {
+                float q4[4];
+                int a2;
+                for (k = 0; k < 4; k++) { tp[k] = 0.0f; for (j = 0; j < 4; j++) tp[k] += reg_f(0x0480 + 16 * k + 4 * j) * in[j]; }
+                have_tp = 1;
+                for (a2 = 0; a2 < 4; a2++) {
+                    uint32_t pb = 0x06C0 + 16 * a2;
+                    q4[a2] = reg_f(pb) * tp[0] + reg_f(pb + 4) * tp[1] + reg_f(pb + 8) * tp[2] + reg_f(pb + 12) * tp[3];
+                }
+                out->tex[0][0] = q4[0]; out->tex[0][1] = q4[1]; out->tex[0][2] = 0.0f;
+                out->tex[0][3] = (m0 == 1) ? q4[3] : 1.0f;
+            }
+        }
+        if (s_gpu.attr[9 + st].size)
+            continue;
+        for (j = 0; j < 4; j++)
+            if (s_reg[(0x03C0 + 16 * st + 4 * j) / 4])
+                any = 1;
+        if (!any)
+            continue;
+        if (!have_tp) {
+            for (k = 0; k < 4; k++) {
+                tp[k] = 0.0f;
+                for (j = 0; j < 4; j++)
+                    tp[k] += reg_f(0x0480 + 16 * k + 4 * j) * in[j];
+            }
+            have_tp = 1;
+        }
+        for (j = 0; j < 4; j++) {
+            uint32_t mode = s_reg[(0x03C0 + 16 * st + 4 * j) / 4];
+            uint32_t pb = 0x06C0 + 0x40 * st + 16 * j;
+            v[j] = out->tex[st][j];
+            switch (mode) {
+            case 0x2400:                                   /* EYE_LINEAR */
+                v[j] = reg_f(pb) * tp[0] + reg_f(pb + 4) * tp[1] + reg_f(pb + 8) * tp[2] + reg_f(pb + 12) * tp[3];
+                break;
+            case 0x2401:                                   /* OBJECT_LINEAR */
+                v[j] = reg_f(pb) * in[0] + reg_f(pb + 4) * in[1] + reg_f(pb + 8) * in[2] + reg_f(pb + 12) * in[3];
+                break;
+            case 0x8511: case 0x8512: case 0x2402:         /* NORMAL_MAP / REFLECTION_MAP / SPHERE_MAP */
+                if (!have_n) {
+                    float n[4], len;
+                    fetch_attr(&s_gpu.attr[2], index, n);
+                    for (k = 0; k < 3; k++)
+                        ne[k] = reg_f(0x0580 + 16 * k) * n[0] + reg_f(0x0580 + 16 * k + 4) * n[1] + reg_f(0x0580 + 16 * k + 8) * n[2];
+                    len = sqrtf(ne[0] * ne[0] + ne[1] * ne[1] + ne[2] * ne[2]);
+                    if (len > 1e-8f) { ne[0] /= len; ne[1] /= len; ne[2] /= len; }
+                    len = sqrtf(tp[0] * tp[0] + tp[1] * tp[1] + tp[2] * tp[2]);
+                    if (len < 1e-8f) len = 1.0f;
+                    for (k = 0; k < 3; k++) u[k] = tp[k] / len;
+                    { float d = u[0] * ne[0] + u[1] * ne[1] + u[2] * ne[2];
+                      for (k = 0; k < 3; k++) r[k] = u[k] - 2.0f * d * ne[k]; }
+                    have_n = 1;
+                }
+                if (mode == 0x8511 && j < 3) v[j] = ne[j];
+                else if (mode == 0x8512 && j < 3) v[j] = r[j];
+                else if (mode == 0x2402 && j < 2) {
+                    float m = 1.0f / (2.0f * sqrtf(r[0] * r[0] + r[1] * r[1] + (r[2] + 1.0f) * (r[2] + 1.0f)) + 1e-12f);
+                    v[j] = r[j] * m + 0.5f;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        if (s_reg[(0x0420 + 4 * st) / 4] & 1) {
+            float m[16], o[4];
+            int ident = 1;
+            for (k = 0; k < 16; k++) {
+                m[k] = reg_f(0x0840 + 0x40 * st + 4 * k);
+                if (m[k] != ((k % 5) == 0 ? 1.0f : 0.0f)) ident = 0;
+            }
+            if (!ident) {
+                for (k = 0; k < 4; k++)
+                    o[k] = v[0] * m[4 * k] + v[1] * m[4 * k + 1] + v[2] * m[4 * k + 2] + v[3] * m[4 * k + 3];
+                for (k = 0; k < 4; k++) v[k] = o[k];
+            }
+        }
+        for (j = 0; j < 4; j++)
+            out->tex[st][j] = v[j];
+    }
+}
+
 /* One fixed-function vertex, in the shape a vertex program produces. */
 static int ffp_vertex(uint32_t index, Nv2aVshOutput *out)
 {
@@ -2311,6 +2415,7 @@ static int ffp_vertex(uint32_t index, Nv2aVshOutput *out)
     fetch_attr(texcoord_attr(), index, out->tex[0]);
     for (st = 1; st < 4; st++)
         fetch_attr(&s_gpu.attr[9 + st], index, out->tex[st]);
+    ffp_texgen(index, in, out);
     return 1;
 }
 
@@ -3173,7 +3278,7 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
     v[0] = va; v[1] = vb; v[2] = vc;
     a = va->pos; b = vb->pos; c = vc->pos;
     T.a = a; T.b = b; T.c = c;
-    if (T.bpp != 4 && T.bpp != 2)
+    if (T.bpp != 4 && T.bpp != 2 && !(s_bex && T.bpp == 1)   /* SG1: B8 shadow maps */)
         return;
     if (a[3] <= 0.0f || b[3] <= 0.0f || c[3] <= 0.0f) {
         s_gpu.tris_behind++;
@@ -4561,6 +4666,8 @@ static void nv2a_pb_exec_method_inner(uint32_t subch, uint32_t method, uint32_t 
         s_gpu.rc_seen = 1;
         break;
     case 0x1E70: s_gpu.rc.stage_program = param; break;
+    case 0x1E74: s_gpu.rc.dot_mapping = param; break;   /* SET_DOT_RGBMAPPING */
+    case 0x1E78: s_gpu.rc.stage_input = param; break;   /* SET_SHADER_OTHER_STAGE_INPUT */
     case 0x17F8: s_gpu.clip_plane_mode = param; break;
 
     /* Alpha test and fog. */
