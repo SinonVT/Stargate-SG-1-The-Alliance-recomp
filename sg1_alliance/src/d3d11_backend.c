@@ -669,6 +669,7 @@ static int g_dbg_tex, g_dbg_log;         /* debug: dump decoded textures to texd
 static struct { uint32_t off, fmt, w, h, lv, flt, draws, tris; double area; float uvspan; uint32_t t1f, t1w, t1h, t2f, t2w, prog, nst, fin0, fin1, ocw0, icw0, uvs1, tv; } g_ta[96];
 static int g_ta_n;
 extern int g_sg1_hdpack;
+extern int g_sg1_fov;
 int g_sg1_cube = 1;   /* Debug menu: sample cube maps (off = neutral white, the old behaviour) */
 static struct { float z; int have; uint32_t off, fmt, w, h, lv, t1f, t1w, t1h, prog; float u, v, density, uvmax; int blend; uint32_t n; } g_pk[3];
 static int g_haze = 1;                   /* heat-haze / refraction texture shaders (0 = skip those draws) */
@@ -691,6 +692,8 @@ static void settings_init(void)
     g_sg1_cube = sg1_cfg_int("cubemaps", 1) ? 1 : 0;
     g_sg1_hdpack = sg1_cfg_int("hdpack", 1) ? 1 : 0;
     g_sg1_custom = sg1_cfg_int("customtex", 0) ? 1 : 0;
+    g_sg1_fov = sg1_cfg_int("fov", 75);
+    if (g_sg1_fov < 60 || g_sg1_fov > 120) g_sg1_fov = 75;
     if (g_sg1_lightfloor < 0 || g_sg1_lightfloor > 4) g_sg1_lightfloor = 0;
     e = getenv("RECOMP_DEBUG_TEXDUMP");
     g_dbg_tex = e ? !(e[0] == '0') : sg1_cfg_int("dbg_texdump", 0) != 0;
@@ -714,6 +717,7 @@ static int tex_want_mips(void)
 static const GUID sg1_CLSID_WICFactory = {0xcacaf262,0x9370,0x4615,{0xa1,0x3b,0x9f,0x55,0x39,0xda,0x4c,0x0a}};
 static const GUID sg1_IID_WICFactory   = {0xec5ec8a9,0xc395,0x4314,{0x9c,0x77,0x54,0xd7,0xa9,0x35,0xff,0x70}};
 static const GUID sg1_PF_BGRA          = {0x6fddc324,0x4e03,0x4bfe,{0xb1,0x85,0x3d,0x77,0x76,0x8d,0xc9,0x0f}};
+int g_sg1_fov = 75;       /* Menu: field of view, sent to the game with the FOV console command */
 int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
 static unsigned g_hd_loaded;
 
@@ -1976,6 +1980,8 @@ static void bm_text(int item, char *b, int n)
         else snprintf(b, n, "Anisotropic filter  < %dx >", g_aniso);
     } else if (item == 2)
         snprintf(b, n, "Mipmaps             < %s >", g_mips ? "on" : "off");
+    else if (item == 14)
+        snprintf(b, n, "Field of view       < %d >", g_sg1_fov);
     else if (item == 13)
         snprintf(b, n, "HD texture pack     < %s >", g_sg1_hdpack ? "on" : "off");
     else if (item == 12) {
@@ -2021,6 +2027,16 @@ static void bm_change(int item, int dir)
         g_mips = !g_mips;
         sg1_cfg_set("mips", g_mips ? "1" : "0");
         g_req_flush = 1;
+    } else if (item == 14) {
+        extern void mkb_type_command(const char *cmd, int delay_ms);
+        char cmd[32];
+        g_sg1_fov += dir > 0 ? 5 : -5;
+        if (g_sg1_fov < 60) g_sg1_fov = 60;
+        if (g_sg1_fov > 120) g_sg1_fov = 120;
+        snprintf(v, sizeof v, "%d", g_sg1_fov);
+        sg1_cfg_set("fov", v);
+        snprintf(cmd, sizeof cmd, "FOV %d", g_sg1_fov);
+        mkb_type_command(cmd, 700);   /* typed into the game console once you stop pressing */
     } else if (item == 13) {
         g_sg1_hdpack = !g_sg1_hdpack;
         sg1_cfg_set("hdpack", g_sg1_hdpack ? "1" : "0");
@@ -2066,7 +2082,7 @@ static void dbg_dump_small_rts(void)
 {   /* debug draw logs: save the 128x128 shadow maps as BMP a few times */
     static unsigned cnt, lastf;
     int i, did = 0;
-    if (!g_dbg_log || cnt >= 8 || g_frame < lastf + 90) return;
+    if (!getenv("RECOMP_RT_DUMP") || cnt >= 8 || g_frame < lastf + 90) return;   /* only with RECOMP_RT_DUMP=1, not with the draw logs */
     for (i = 0; i < MAX_RT; i++) {
         Rt *r = &g_rt[i];
         D3D11_TEXTURE2D_DESC td;
@@ -2204,6 +2220,6 @@ void sg1_gpu_backend_install(void)
     extern int (*xbox_fb_hires_hook)(uint32_t, const uint32_t **, uint32_t *, uint32_t *);
     nv2a_backend_register_ex(&g_backend);
     xbox_fb_hires_hook = sg1_hires_grab;
-    g_sg1_bm_count = 14; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
+    g_sg1_bm_count = 15; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
     fprintf(stderr, "[GPU11] D3D11 back end registered\n");
 }

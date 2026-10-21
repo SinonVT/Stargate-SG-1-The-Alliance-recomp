@@ -18,5 +18,6 @@ name, so they apply to any build of the same package and are safe to re-run.
 | id | file | fix |
 |----|------|-----|
 | `teamsay-nonteam` | `Engine.u` | `TeamSay` was silently dropped in non-team games (e.g. Deathmatch) because the anti-spam check ran twice. |
+| `gamemodes-last-man-standing` | `System\tweak\MP\GameModes.ini` | Enables the Last Man Standing game mode (the code is in `StargateGame.u`, only the menu entry was commented out). |
 
 To add a patch, append an entry to `PATCHES` in `sg1patch.py`.

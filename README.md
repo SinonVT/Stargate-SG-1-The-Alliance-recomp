@@ -48,7 +48,15 @@ dbglaunch.exe sg1_alliance_recomp.exe
 Useful environment variables (some are set by default in `main.c`): `RECOMP_PB_EXEC=1`, `RECOMP_GPU=1`, `RECOMP_FB_WINDOW=1`, `RECOMP_VBLANK=paced`, `RECOMP_MKB=1` (mouse and keyboard). Variables set with `set` stay in a command window, so use a fresh prompt when measuring performance.
 
 ## In-game settings (Insert)
-Mouse sensitivity, Invert Y, Controllers on/off, Resolution (480p to 2160p), Anisotropic filter, Mipmaps, HD texture pack, Custom textures, Heat haze, Player shadows, Game gamma/brightness (applies the game's own gamma ramp), Dark area lift (off / low / medium / high / max) and a Debug page (texture dump, draw logs, hide draws, floor texgen fix, cube map lighting). Esc on the Debug page goes back. Defaults on a fresh install: mouse sensitivity 50, controllers off, HD texture pack on, 720p, anisotropic off, mipmaps on, custom textures off, heat haze on, player shadows on, game gamma on, dark area lift low, floor texgen fix and cube map lighting on, debug items off. Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
+Mouse sensitivity, Invert Y, Controllers on/off, Field of view (60-120, typed into the game console for you, so use it in a map; the game saves it in `System\User.ini`), Resolution (480p to 2160p), Anisotropic filter, Mipmaps, HD texture pack, Custom textures, Heat haze, Player shadows, Game gamma/brightness (applies the game's own gamma ramp), Dark area lift (off / low / medium / high / max) and a Debug page (texture dump, draw logs, hide draws, floor texgen fix, cube map lighting). Esc on the Debug page goes back. Defaults on a fresh install: mouse sensitivity 50, controllers off, HD texture pack on, 720p, anisotropic off, mipmaps on, custom textures off, heat haze on, player shadows on, game gamma on, dark area lift low, floor texgen fix and cube map lighting on, debug items off. Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
+
+## Controls
+In a match the keyboard and mouse go to the game through its own bindings in `System\User.ini` (the PC prototype layout: WASD, Space jump, Ctrl/C duck, Shift walk, Z zoom, R reload, F use, number keys select weapons, mouse wheel cycles). The toolkit's keyboard-as-controller layer (Z/X/C/V = A/B/X/Y) is only active in the front-end menus, because the menus only listen to a pad; the recompiled build turns it off while a match is loaded (it follows the game's own log). Known issue: C may still jump in a match.
+
+## Optional tools
+- `sg1_alliance\tools\extract_scripts.py <game dir> <out dir>` writes the UnrealScript source that every `System\*.u` package carries (do not publish its output).
+- `sg1_alliance\tools\debug_menu.py <game dir> on|off` is an experiment to open the game's leftover PC debug menu (F6); it replaces the console and breaks the console-typing the FOV and profile-name features use, so leave it off.
+- `sg1patch.py` also has a game-mode patch that enables Last Man Standing in `System\tweak\MP\GameModes.ini`.
 
 ## What we changed in xboxrecomp
 Performance
@@ -71,7 +79,7 @@ Input
 
 ## Caveats
 - Tested on one machine (GTX 750, many cores). Threading is disabled below 4 cores.
-- Debug logging is off unless you enable the debug items in the Insert menu; those can write logs, `texdump` folders and small `rt128_*.bmp` files next to the exe. Delete them before sharing a build directory.
+- Debug logging is off unless you enable the debug items in the Insert menu; those can write logs, `texdump` folders next to the exe (`rt128_*.bmp` shadow-map dumps only with `RECOMP_RT_DUMP=1`). Delete them before sharing a build directory.
 - In-game gamma/brightness/contrast keys (F10/F11/F12) work, but F12 crashes when a debugger is attached (Windows reserves it). The original `UnrealEngine2.ini` values are Brightness 0.8, Contrast 0.7, Gamma 0.8.
 - This is not an official project and has no affiliation with the game's rights holders.
 

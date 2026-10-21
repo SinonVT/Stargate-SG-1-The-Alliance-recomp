@@ -30,13 +30,14 @@
  * buttons are already in pState and the keyboard only adds to them --
  * and there is no special case left to get wrong. */
 extern int mkb_text_mode(void);
+extern int mkb_in_game(void);
 extern int mkb_key_blocked(int vk);
 static void keyboard_merge(XBOX_INPUT_STATE *pState)
 {
     XBOX_INPUT_STATE kb;
     int i;
 
-    if (mkb_text_mode())
+    if (mkb_text_mode() || mkb_in_game())   /* in a match the keys reach the game through System\User.ini only */
         return;
     if (!xbox_InputKeyboardPoll(&kb))
         return;

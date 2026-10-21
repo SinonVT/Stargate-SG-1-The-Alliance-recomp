@@ -194,6 +194,9 @@ static void kq_push(unsigned vk, int down, int rep, unsigned ch)
  * as pad buttons -- so the keyboard-as-pad layers stand down. */
 static volatile LONG s_menu_tick;
 static volatile int mkb_txt;
+static volatile int s_ingame;                    /* a match is loaded (set from the guest log) */
+void mkb_set_ingame(int on) { s_ingame = on ? 1 : 0; fprintf(stderr, "[MKB] in game: %d\n", s_ingame); fflush(stderr); }
+int mkb_in_game(void) { return s_ingame; }
 static int s_startdbg;
 void mkb_note_menu(void) { s_menu_tick = (LONG)GetTickCount(); }
 static volatile LONG s_blk[256];
@@ -612,6 +615,7 @@ int mkb_game_mouse(int *dx, int *dy)
  * "SetName <profile>" fixes both the player name and the default URL, so the
  * recompiled build types it into the console by itself. */
 static char s_prof[40];
+static char s_cmd[48];                                       /* generic console command to type (FOV etc.) */
 static volatile LONG s_nm_due, s_nm_done;                 /* tick at which to type, 0 = idle */
 static KbEvt s_nm_seq[160]; static int s_nm_n, s_nm_i; static DWORD s_nm_t;
 void mkb_set_profile(const char *name)
@@ -623,6 +627,15 @@ void mkb_set_profile(const char *name)
     }
     s_prof[n] = 0;
     fprintf(stderr, "[MKB] profile name '%s'\n", s_prof); fflush(stderr);
+}
+/* Type "<cmd>" into the game console after delay_ms (re-arming replaces a pending one). */
+void mkb_type_command(const char *cmd, int delay_ms)
+{
+    LONG due;
+    if (s_nm_n > 0) return;                       /* already typing */
+    snprintf(s_cmd, sizeof s_cmd, "%s", cmd);
+    due = (LONG)(GetTickCount() + (DWORD)delay_ms); if (!due) due = 1;
+    s_nm_due = due; s_nm_n = 0; s_nm_i = 0;
 }
 void mkb_arm_name(int delay_ms)
 {
@@ -641,18 +654,18 @@ static int nm_next(int *vk, int *down, int *rep, int *ch)
     DWORD now = GetTickCount();
     if (s_nm_due && !s_nm_n) {
         if ((LONG)(now - (DWORD)s_nm_due) < 0) return 0;
-        {   const char *cmd = "SetName "; int i;
+        {   const char *cmd = s_cmd[0] ? s_cmd : "SetName "; int i;
             nm_add(0x67, 1, 0); nm_add(0x67, 0, 0);
             nm_add(0x20, 1, ' '); nm_add(0x20, 0, 0);          /* first char is swallowed */
             for (i = 0; cmd[i]; i++) { unsigned c = (unsigned char)cmd[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : (c == ' ' ? 0x20 : c); nm_add(v, 1, c); nm_add(v, 0, 0); }
-            for (i = 0; s_prof[i]; i++) { unsigned c = (unsigned char)s_prof[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : c; nm_add(v, 1, c); nm_add(v, 0, 0); }
+            if (!s_cmd[0]) for (i = 0; s_prof[i]; i++) { unsigned c = (unsigned char)s_prof[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : c; nm_add(v, 1, c); nm_add(v, 0, 0); }
             nm_add(0x0D, 1, 0); nm_add(0x0D, 0, 0);
         }
         s_nm_i = 0; s_nm_t = now;
-        fprintf(stderr, "[MKB] typing SetName %s\n", s_prof); fflush(stderr);
+        fprintf(stderr, "[MKB] typing %s%s\n", s_cmd[0] ? s_cmd : "SetName ", s_cmd[0] ? "" : s_prof); fflush(stderr);
     }
     if (!s_nm_n) return 0;
-    if (s_nm_i >= s_nm_n) { s_nm_n = 0; s_nm_due = 0; s_nm_done = 1; s_nm_end = (LONG)(now + 400); return 0; }
+    if (s_nm_i >= s_nm_n) { s_nm_n = 0; s_nm_due = 0; s_nm_done = 1; s_cmd[0] = 0; s_nm_end = (LONG)(now + 400); return 0; }
     if (now - s_nm_t < (s_nm_i < 2 ? 150u : 35u)) return 0;
     s_nm_t = now;
     *vk = s_nm_seq[s_nm_i].vk; *down = s_nm_seq[s_nm_i].down; *rep = 0; *ch = s_nm_seq[s_nm_i].ch;
@@ -756,16 +769,7 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
     if (btn & 0x02) analog[XBOX_BUTTON_LTRIGGER] = 255;  /* ADS/aim   */
     if (btn & 0x04) b |= 0;                              /* M: below  */
 
-    /* ---- keyboard: WASD movement ---- */
-    {
-        int mx = 0, my = 0;
-        if (MK_VK('W')) my += 1;
-        if (MK_VK('S')) my -= 1;
-        if (MK_VK('A')) mx -= 1;
-        if (MK_VK('D')) mx += 1;
-        if (mx && my) { mx = (int)(mx * 70.71); my = (int)(my * 70.71); }
-        if (mx || my) mkb_aim_vector(mx / 100.0, my / 100.0, &mov_x, &mov_y);
-    }
+    /* WASD / arrows / letters: left to the game's own keyboard bindings (System\User.ini) */
 
     /* ---- mouse: aim ---- */
     if ((dx || dy) && !mkb_native_aim()) {
@@ -793,25 +797,15 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
     }
 
     /* ---- keyboard: buttons (Black's layout) ---- */
-    if (MK_VK(VK_SPACE))  analog[XBOX_BUTTON_A]     = 255; /* use/jump */
-    if (MK_VK('R'))       analog[XBOX_BUTTON_X]     = 255; /* reload    */
-    if (MK_VK('E'))       analog[XBOX_BUTTON_B]     = 255; /* alt use   */
-    if (MK_VK('Q'))       analog[XBOX_BUTTON_WHITE] = 255; /* grenade   */
-    if (MK_VK('F'))       analog[XBOX_BUTTON_BLACK] = 255; /* alt gren. */
     if (btn & 0x08)       analog[XBOX_BUTTON_WHITE] = 255; /* X1        */
     if (btn & 0x10)       analog[XBOX_BUTTON_BLACK] = 255; /* X2        */
     if (MK_VK(VK_RETURN) || MK_VK(VK_ESCAPE)) { b |= XBOX_GAMEPAD_START; if (!s_startdbg) fprintf(stderr, "[STARTDBG] mkb start edge\n"); s_startdbg = 1; } else s_startdbg = 0;
     if (MK_VK(VK_TAB))                         b |= XBOX_GAMEPAD_BACK;
-    if (MK_VK(VK_LSHIFT))                      b |= XBOX_GAMEPAD_LEFT_THUMB;
-    if (MK_VK(VK_LCONTROL))                    b |= XBOX_GAMEPAD_RIGHT_THUMB;
-    if (MK_VK(VK_UP))    b |= XBOX_GAMEPAD_DPAD_UP;
-    if (MK_VK(VK_DOWN))  b |= XBOX_GAMEPAD_DPAD_DOWN;
-    if (MK_VK(VK_LEFT))  b |= XBOX_GAMEPAD_DPAD_LEFT;
-    if (MK_VK(VK_RIGHT)) b |= XBOX_GAMEPAD_DPAD_RIGHT;
+    /* LShift handled by the keyboard layer (Walking in User.ini); no pad LEFT_THUMB (= duck toggle) */
+    /* LCtrl handled by the keyboard layer (Duck in User.ini); no pad RIGHT_THUMB */
 
     /* ---- wheel / middle button: cycle weapon ---- */
-    if (wheel || (btn & 0x04))
-        analog[XBOX_BUTTON_Y] = 255;
+    (void)wheel;   /* wheel = weapon select, middle button = Zoom: both native bindings */
 
     /* ---- merge on top of whatever the host pad produced ---- */
     if (b)        { pState->Gamepad.wButtons |= b; any = 1; }

@@ -270,13 +270,14 @@ void recomp_debug_service(uint32_t service, uint32_t arg_va)
         fputc('\n', stderr);
     fflush(stderr);
     {   /* SG1: follow the selected profile into the match (see mkb_set_profile) */
-        extern void mkb_set_profile(const char *); extern void mkb_arm_name(int);
+        extern void mkb_set_profile(const char *); extern void mkb_arm_name(int); extern void mkb_set_ingame(int);
         char ln[200]; int ll = length < 199 ? length : 199; const char *q;
         memcpy(ln, mem + buffer_va, ll); ln[ll] = 0;
         q = strstr(ln, "Setting Profile to ");
         if (q) mkb_set_profile(q + 19);
         else if (strstr(ln, "PostLogin:") && !strstr(ln, "MainMenu.") && !strstr(ln, "Entry.")) mkb_arm_name(-4000);
         else if (strstr(ln, "Init: LoadMap:") && !strstr(ln, "LoadMap: mainmenu") && !strstr(ln, "LoadMap: Entry")) mkb_arm_name(15000);
+        if (strstr(ln, "Init: LoadMap:")) mkb_set_ingame(!strstr(ln, "LoadMap: mainmenu") && !strstr(ln, "LoadMap: Entry"));
     }
     /* SG1: dump the guest stack when the engine reports a failed assertion */
     {

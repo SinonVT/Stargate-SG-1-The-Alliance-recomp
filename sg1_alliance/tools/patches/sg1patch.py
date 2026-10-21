@@ -85,6 +85,41 @@ PATCHES = [
     ),
 ]
 
+# Text patches: replace one line of a game config file (found by its exact text).
+TEXT_PATCHES = [
+    dict(
+        id="gamemodes-last-man-standing",
+        file=os.path.join("System", "tweak", "MP", "GameModes.ini"),
+        match='#GameModes=(Name="Last Man Standing",GameClass="StargateGame.LastManStandingGame")',
+        new='GameModes=(Name="Last Man Standing",GameClass="StargateGame.LastManStandingGame")',
+        why=("The Last Man Standing game mode is fully present in StargateGame.u "
+             "but its menu entry was commented out. This enables it."),
+    ),
+]
+
+def run_text_patches(a):
+    rc = 0
+    for p in TEXT_PATCHES:
+        path = os.path.join(a.gamedir, p['file']); bak = path + '.orig_sg1'
+        print('[%s] %s' % (p['id'], p['file']))
+        if a.revert:
+            if os.path.exists(bak): shutil.copyfile(bak, path); print('  restored from backup')
+            else: print('  no backup, nothing to do')
+            continue
+        if not os.path.exists(path): print('  missing file, skipped'); rc = 1; continue
+        raw = open(path, 'rb').read(); nl = b'\r\n' if b'\r\n' in raw else b'\n'
+        lines = raw.split(nl); hit = [i for i, l in enumerate(lines) if p['match'].encode() in l]
+        if not hit:
+            if p['new'].encode() in raw: print('  already applied')
+            else: print('  skipped: line not found'); rc = 1
+            continue
+        print('  needs patch (%s)' % p['why'])
+        if a.check: continue
+        if not os.path.exists(bak): shutil.copyfile(path, bak)
+        for i in hit: lines[i] = p['new'].encode()
+        open(path, 'wb').write(nl.join(lines)); print('  patched, backup at', bak)
+    return rc
+
 def find_patch(d, p):
     names, exports = parse(d)
     old = names.index(p['old_call']); new = names.index(p['new_call'])
@@ -125,6 +160,7 @@ def main():
         if not os.path.exists(bak): shutil.copyfile(path, bak)
         at = off + ho[0]; d[at:at + len(nc)] = nc
         open(path, 'wb').write(d); print('  patched, backup at', bak)
+    rc |= run_text_patches(a)
     sys.exit(rc)
 
 if __name__ == '__main__':
