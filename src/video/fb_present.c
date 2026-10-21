@@ -287,23 +287,66 @@ static int mn_key_edge(int vk, int *prev)
     return e;
 }
 
-static int mn_items(void) { return 3 + g_sg1_bm_count; }
+/* Menu pages. Entry codes: 0..2 = front-end items (mouse, invert Y, controllers), 100+k = back-end item k
+ * (d3d11_backend.c), 900 = open the debug page, 901 = back to the main page. */
+static int s_mn_page;
+static const int s_mn_main[] = { 0, 1, 2, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
+static const int s_mn_dbg[]  = { 111, 105, 106, 107, 901 };
+
+static int mn_items(void) { return s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
+static int mn_code(int i) { return s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
 
 static void mn_text(int i, char *b, int n)
 {
-    if (i == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
-    else if (i == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
-    else if (i == 2) snprintf(b, n, "Game controllers    < %s >", sg1_controllers_on() ? "on" : "off");
-    else if (g_sg1_bm_text) g_sg1_bm_text(i - 3, b, n);
-    else b[0] = 0;
+    int c = mn_code(i);
+    b[0] = 0;
+    if (c == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
+    else if (c == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
+    else if (c == 2) snprintf(b, n, "Game controllers    < %s >", sg1_controllers_on() ? "on" : "off");
+    else if (c == 900) snprintf(b, n, "Debug menu          >");
+    else if (c == 901) snprintf(b, n, "<  Back");
+    else if (c >= 100 && c < 200 && g_sg1_bm_text && c - 100 < g_sg1_bm_count) g_sg1_bm_text(c - 100, b, n);
 }
 
 static void mn_change(int i, int dir)
 {
-    if (i == 0) mkb_scale_mul(dir > 0 ? 1.25f : 1.0f / 1.25f);
-    else if (i == 1) mkb_invert_y_toggle();
-    else if (i == 2) sg1_controllers_toggle();
-    else if (g_sg1_bm_change) g_sg1_bm_change(i - 3, dir);
+    int c = mn_code(i);
+    if (c == 0) mkb_scale_mul(dir > 0 ? 1.25f : 1.0f / 1.25f);
+    else if (c == 1) mkb_invert_y_toggle();
+    else if (c == 2) sg1_controllers_toggle();
+    else if (c == 900) { if (dir > 0) { s_mn_page = 1; s_mn_sel = 0; } }
+    else if (c == 901) { s_mn_page = 0; s_mn_sel = 0; }
+    else if (c >= 100 && c < 200 && g_sg1_bm_change && c - 100 < g_sg1_bm_count) g_sg1_bm_change(c - 100, dir);
+}
+
+/* SG1: the game's gamma ramp (Brightness/Contrast/Gamma). The game writes it to the DAC palette; the
+ * recomp captures it (hook in sub_00456DBE) and applies it to the finished frame here. */
+uint8_t g_sg1_gamma[768];
+volatile int g_sg1_gamma_set;
+int g_sg1_gamma_on = 1;
+static void sg1_apply_gamma(uint32_t *px, uint32_t w, uint32_t h)
+{
+    static uint8_t lut[768];
+    static int ident = 1, seen;
+    size_t i, n = (size_t)w * h;
+    if (!g_sg1_gamma_on || !px) return;
+    if (g_sg1_gamma_set) {
+        int k;
+        g_sg1_gamma_set = 0;
+        memcpy(lut, g_sg1_gamma, 768);
+        ident = 1;
+        for (k = 0; k < 256; k++)
+            if (lut[k] != k || lut[256 + k] != k || lut[512 + k] != k) ident = 0;
+        seen = 1;
+        if (getenv("RECOMP_GAMMA_LOG"))
+            fprintf(stderr, "[GAMMA] ramp R[0,64,128,192,255]=%u,%u,%u,%u,%u G[128]=%u B[128]=%u identity=%d\n",
+                    lut[0], lut[64], lut[128], lut[192], lut[255], lut[256 + 128], lut[512 + 128], ident);
+    }
+    if (!seen || ident) return;
+    for (i = 0; i < n; i++) {
+        uint32_t c = px[i];
+        px[i] = (c & 0xFF000000u) | ((uint32_t)lut[(c >> 16) & 255] << 16) | ((uint32_t)lut[256 + ((c >> 8) & 255)] << 8) | lut[512 + (c & 255)];
+    }
 }
 
 static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
@@ -319,17 +362,18 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
     int rete = ret && !p_ret;
     p_ret = ret;
     if (!fg) return;
-    if (ins || (open && esc)) { open = !open; g_sg1_menu_open = open; if (open) s_mn_sel = 0; }
+    if (open && esc && s_mn_page) { s_mn_page = 0; s_mn_sel = 0; esc = 0; ins = 0; }   /* Esc on the debug page goes back */
+    if (ins || (open && esc)) { open = !open; g_sg1_menu_open = open; if (open) { s_mn_sel = 0; s_mn_page = 0; } }
     if (!open || !px || w < 160 || h < 120) return;
     {
         int n = mn_items(), r;
         if (up) s_mn_sel = (s_mn_sel + n - 1) % n;
         if (dn) s_mn_sel = (s_mn_sel + 1) % n;
-        if (lt) mn_change(s_mn_sel, -1);
+        if (lt) { if (s_mn_page && mn_code(s_mn_sel) == 901) mn_change(s_mn_sel, +1); else mn_change(s_mn_sel, -1); }
         if (rt || rete) mn_change(s_mn_sel, +1);
         {
             int fpx = (int)h / 28; if (fpx < 14) fpx = 14; if (fpx > 40) fpx = 40;
-            int pw = fpx * 22, ph = fpx * (n + 4), x0 = fpx, y0 = fpx, x, y;
+            int pw = fpx * (s_mn_page ? 40 : 22), ph = fpx * (n + 4), x0 = fpx, y0 = fpx, x, y;
             BITMAPINFO bi; void *bits = NULL; HBITMAP bmp; HDC dc; HFONT fnt, old; RECT rc; uint32_t *dib;
             if (pw > (int)w - 2 * x0) pw = (int)w - 2 * x0;
             if (ph > (int)h - 2 * y0) ph = (int)h - 2 * y0;
@@ -347,7 +391,7 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
             old = (HFONT)SelectObject(dc, fnt);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(255, 255, 255));
-            TextOutA(dc, fpx / 2, fpx / 3, "SETTINGS  (Insert closes)", 25);
+            { const char *tt = s_mn_page ? "DEBUG  (Esc = back, Insert closes)" : "SETTINGS  (Insert closes)"; TextOutA(dc, fpx / 2, fpx / 3, tt, (int)strlen(tt)); }
             for (r = 0; r < n; r++) {
                 char line[96];
                 int ty = fpx * (r + 2);
@@ -756,12 +800,14 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                     if (s_hi_show_cap < need) { free(s_hi_show); s_hi_show = (uint32_t *)malloc(need * 4); s_hi_show_cap = s_hi_show ? need : 0; }
                     if (s_hi_show) {
                         memcpy(s_hi_show, s_hi[idx], need * 4);
+                        sg1_apply_gamma(s_hi_show, hw, hh);
                         sg1_menu_frame(hwnd, s_hi_show, hw, hh);
                         paced = fb_show_hi(hwnd, hdc, s_hi_show, hw, hh);
                         goto shown;
                     }
                 }
             }
+            sg1_apply_gamma(s_rgb, s_fb_width, s_fb_height);
             sg1_menu_frame(hwnd, s_rgb, s_fb_width, s_fb_height);
             paced = fb_show(hwnd, hdc, &bi);
             shown: ;
@@ -773,6 +819,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
             fb_convert(src, s_fb_pitch / s_fb_width);
             if (!fb_pinned)
                 fb_overlay();
+            sg1_apply_gamma(s_rgb, s_fb_width, s_fb_height);
             sg1_menu_frame(hwnd, s_rgb, s_fb_width, s_fb_height);
             paced = fb_show(hwnd, hdc, &bi);
         }

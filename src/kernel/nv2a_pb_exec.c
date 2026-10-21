@@ -2164,6 +2164,7 @@ __declspec(thread) static float s_sg1_em[3], s_sg1_ma[3], s_sg1_md[3], s_sg1_alp
 static _Thread_local float s_sg1_em[3], s_sg1_ma[3], s_sg1_md[3], s_sg1_alpha;
 #endif
 
+int g_sg1_lightfloor;   /* 0 off .. 4: ambient floor for unlit static meshes (Insert menu) */
 static int lit_color(uint32_t index, float out[4])
 {
     const float *mv = (const float *)&s_reg[0x0480 / 4];
@@ -2263,8 +2264,46 @@ static int lit_color(uint32_t index, float out[4])
         }
     }
     out[3] = s_sg1_alpha;
+    if (g_sg1_lightfloor > 0 && (colmat & 3u) == 1u) {   /* SG1 option: lift unlit static meshes (vertex colour is the emission) */
+        static const float fl[5] = { 0.0f, 0.06f, 0.12f, 0.20f, 0.30f };
+        float f = fl[g_sg1_lightfloor > 4 ? 4 : g_sg1_lightfloor];
+        for (i = 0; i < 3; i++)
+            out[i] = f + out[i] * (1.0f - f);
+    }
     for (i = 0; i < 4; i++)
         out[i] = out[i] < 0.0f ? 0.0f : out[i] > 1.0f ? 1.0f : out[i];
+    {   /* SG1: RECOMP_LIGHT_LOG: sample black lit vertices */
+        static int ll = -1;
+        static unsigned cnt, shown;
+        if (ll < 0) ll = getenv("RECOMP_LIGHT_LOG") != NULL;
+        if (ll && mask == 0 && out[0] + out[1] + out[2] == 0.0f && shown < 80 && (++cnt % 997) == 0) {
+            const VertexAttr *ca = color_attr();
+            shown++;
+            {   extern void sg1_watch_arm(uint32_t va);
+                if (getenv("RECOMP_WATCH") && color_attr()->offset) sg1_watch_arm(color_attr()->offset + index * color_attr()->stride + 64u * 4u); }
+            fprintf(stderr, "[LITBLK] idx %u colmat %08X inl %d have_vc %d vc %.2f %.2f %.2f %.2f | color_attr(type %u size %u off %08X stride %u) a3(type %u size %u off %08X stride %u) a4(type %u size %u off %08X stride %u) em %.2f %.2f %.2f ma %.2f md %.2f nrm %.2f %.2f %.2f tex0 fmt %02X blend %u\n",
+                    index, colmat, (int)s_gpu.inline_active, have_vc, vc[0], vc[1], vc[2], vc[3],
+                    ca->type, ca->size, ca->offset, ca->stride,
+                    s_gpu.attr[3].type, s_gpu.attr[3].size, s_gpu.attr[3].offset, s_gpu.attr[3].stride,
+                    s_gpu.attr[4].type, s_gpu.attr[4].size, s_gpu.attr[4].offset, s_gpu.attr[4].stride,
+                    s_sg1_em[0], s_sg1_em[1], s_sg1_em[2], s_sg1_ma[0], s_sg1_md[0], nrm[0], nrm[1], nrm[2],
+                    s_gpu.texs[0].color, s_reg[0x0304 / 4]);
+            if (ca->size == 4 && ca->offset && s_gpu.attr[4].size == 4 && s_gpu.attr[4].offset) {
+                const uint32_t *m3 = (const uint32_t *)((const uint8_t *)xbox_GetMemoryOffset() + ca->offset);
+                const uint32_t *m4 = (const uint32_t *)((const uint8_t *)xbox_GetMemoryOffset() + s_gpu.attr[4].offset);
+                unsigned nz3 = 0, nz4 = 0, q;
+                for (q = 0; q < 512; q++) { if ((m3[q] & 0xFFFFFF) != 0) nz3++; if ((m4[q] & 0xFFFFFF) != 0) nz4++; }
+                if (shown <= 12) {
+                    uint32_t q2;
+                    fprintf(stderr, "[LITBLK3] buf %08X idx %u:", ca->offset, index);
+                    for (q2 = 0; q2 < 96; q2++) fprintf(stderr, "%s%06X", (q2 & 15) ? " " : "\n[LITBLK3] ", m3[q2] & 0xFFFFFF);
+                    fprintf(stderr, "\n");
+                }
+                fprintf(stderr, "[LITBLK2] a3 first: %08X %08X %08X %08X nonzero rgb of 512: %u | a4 first: %08X %08X %08X %08X nonzero of 512: %u\n",
+                        m3[0], m3[1], m3[2], m3[3], nz3, m4[0], m4[1], m4[2], m4[3], nz4);
+            }
+        }
+    }
     {   /* SG1: lighting left on with no light enabled and nothing feeding the colour
          * (the HUD portrait, weapon icons, particles): the hardware shows the vertex
          * colour there, the sum above comes out black. RECOMP_FFP_UNLIT_FIX=0 turns this off. */
@@ -2282,6 +2321,7 @@ static int lit_color(uint32_t index, float out[4])
  * Registers: TEXGEN S/T/R/Q at 0x03C0 + 16*stage + 4*comp; planes at 0x06C0 + 0x40*stage + 16*comp;
  * texture-matrix enable at 0x0420 + 4*stage; texture matrix at 0x0840 + 0x40*stage; model-view 0x0480,
  * inverse model-view 0x0580. RECOMP_TEXGEN=0 turns it off. */
+int g_sg1_texmat = 1;   /* texture matrix on stages that have a vertex stream (Debug menu) */
 int g_sg1_tg0 = 1;   /* 0 off, 1 planes projective, 2 planes plain: set from the Insert menu */
 static void ffp_texgen(uint32_t index, const float in[4], Nv2aVshOutput *out)
 {
@@ -2292,6 +2332,43 @@ static void ffp_texgen(uint32_t index, const float in[4], Nv2aVshOutput *out)
     if (on < 0) { const char *e = getenv("RECOMP_TEXGEN"); on = !(e && e[0] == '0'); }
     if (!on)
         return;
+    {   /* SG1: RECOMP_TEXLOG=1: sample how stages 0/1 get their coordinates (stage_program 0x21 = BSP-style floor draws) */
+        static int tl = -1;
+        static unsigned tc, tn;
+        if (tl < 0) tl = getenv("RECOMP_TEXLOG") != NULL;
+        if (tl && s_gpu.rc.stage_program == 0x21u && s_gpu.texs[0].width == 256 && s_gpu.texs[0].color == 0x0C && s_gpu.texs[1].color == 0x06 && s_gpu.texs[1].width == 128 && tn < 24 && (++tc % 1499) == 0) {
+            int q;
+            tn++;
+            fprintf(stderr, "[TEXLOG] idx %u pos=(%.1f %.1f %.1f) prog=%08X\n", index, in[0], in[1], in[2], s_gpu.rc.stage_program);
+            for (q = 0; q < 2; q++) {
+                float tv[4];
+                fetch_attr(&s_gpu.attr[9 + q], index, tv);
+                fprintf(stderr, "[TEXLOG]  st%d attr{type %u size %u stride %u off %08X} val=(%.3f %.3f %.3f %.3f) texgen S/T/R/Q=%04X %04X %04X %04X texmat_en=%08X\n", q,
+                        s_gpu.attr[9 + q].type, s_gpu.attr[9 + q].size, s_gpu.attr[9 + q].stride, s_gpu.attr[9 + q].offset, tv[0], tv[1], tv[2], tv[3],
+                        s_reg[(0x03C0 + 16 * q) / 4], s_reg[(0x03C4 + 16 * q) / 4], s_reg[(0x03C8 + 16 * q) / 4], s_reg[(0x03CC + 16 * q) / 4], s_reg[(0x0420 + 4 * q) / 4]);
+                fprintf(stderr, "[TEXLOG]  st%d texmat: %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f\n", q,
+                        reg_f(0x0840 + 0x40 * q), reg_f(0x0844 + 0x40 * q), reg_f(0x0848 + 0x40 * q), reg_f(0x084C + 0x40 * q),
+                        reg_f(0x0850 + 0x40 * q), reg_f(0x0854 + 0x40 * q), reg_f(0x0858 + 0x40 * q), reg_f(0x085C + 0x40 * q),
+                        reg_f(0x0860 + 0x40 * q), reg_f(0x0864 + 0x40 * q), reg_f(0x0868 + 0x40 * q), reg_f(0x086C + 0x40 * q),
+                        reg_f(0x0870 + 0x40 * q), reg_f(0x0874 + 0x40 * q), reg_f(0x0878 + 0x40 * q), reg_f(0x087C + 0x40 * q));
+                fprintf(stderr, "[TEXLOG]  st%d planes S: %.3f %.3f %.3f %.3f  T: %.3f %.3f %.3f %.3f\n", q,
+                        reg_f(0x06C0 + 0x40 * q), reg_f(0x06C4 + 0x40 * q), reg_f(0x06C8 + 0x40 * q), reg_f(0x06CC + 0x40 * q),
+                        reg_f(0x06D0 + 0x40 * q), reg_f(0x06D4 + 0x40 * q), reg_f(0x06D8 + 0x40 * q), reg_f(0x06DC + 0x40 * q));
+            }
+            {   /* neighbouring vertices: position vs. stream coordinates, to see the UV density */
+                uint32_t q2;
+                for (q2 = 0; q2 < 8; q2++) {
+                    float pp[4], t0v[4];
+                    if (!fetch_attr(&s_gpu.attr[0], index + q2, pp)) break;
+                    fetch_attr(&s_gpu.attr[9], index + q2, t0v);
+                    fprintf(stderr, "[TEXLOG]   v%u pos=(%.1f %.1f %.1f) uv0=(%.4f %.4f)\n", index + q2, pp[0], pp[1], pp[2], t0v[0], t0v[1]);
+                }
+                fprintf(stderr, "[TEXLOG]   tex0 %ux%u fmt %02X addr_u/v %u %u levels %u filter %08X | tex1 %ux%u fmt %02X\n", s_gpu.texs[0].width, s_gpu.texs[0].height, s_gpu.texs[0].color,
+                        s_gpu.texs[0].addr_u, s_gpu.texs[0].addr_v, s_gpu.texs[0].levels, s_gpu.texs[0].filter, s_gpu.texs[1].width, s_gpu.texs[1].height, s_gpu.texs[1].color);
+            }
+            fflush(stderr);
+        }
+    }
     for (st = 0; st < 4; st++) {
         float v[4];
         int any = 0;
@@ -2310,11 +2387,33 @@ static void ffp_texgen(uint32_t index, const float in[4], Nv2aVshOutput *out)
                 out->tex[0][3] = (m0 == 1) ? q4[3] : 1.0f;
             }
         }
-        if (s_gpu.attr[9 + st].size)
-            continue;
         for (j = 0; j < 4; j++)
             if (s_reg[(0x03C0 + 16 * st + 4 * j) / 4])
                 any = 1;
+        if (st == 0 && s_gpu.rc.stage_program == 0xC21u && s_gpu.attr[9].size)
+            continue;                                      /* the shadow stage was set above */
+        if (s_gpu.attr[9 + st].size && !(g_sg1_texmat && any)) {
+            /* A stage fed by a vertex stream, texgen off: it may still have a texture matrix. */
+            if (g_sg1_texmat && (s_reg[(0x0420 + 4 * st) / 4] & 1)) {
+                float m[16], o[4], v4[4];
+                int ident = 1;
+                for (k = 0; k < 16; k++) {
+                    m[k] = reg_f(0x0840 + 0x40 * st + 4 * k);
+                    if (m[k] != ((k % 5) == 0 ? 1.0f : 0.0f)) ident = 0;
+                }
+                if (!ident) {
+                    for (k = 0; k < 4; k++) v4[k] = out->tex[st][k];
+                    if (v4[3] == 0.0f) v4[3] = 1.0f;
+                    for (k = 0; k < 4; k++)
+                        o[k] = v4[0] * m[4 * k] + v4[1] * m[4 * k + 1] + v4[2] * m[4 * k + 2] + v4[3] * m[4 * k + 3];
+                    for (k = 0; k < 4; k++) out->tex[st][k] = o[k];
+                }
+            }
+            continue;
+        }
+        /* SG1: texgen on for this stage: the hardware ignores the vertex stream (a leftover array from an
+         * earlier draw can still be set up), so start from zero rather than from it. */
+        if (s_gpu.attr[9 + st].size) { out->tex[st][0] = out->tex[st][1] = out->tex[st][2] = 0.0f; out->tex[st][3] = 1.0f; }
         if (!any)
             continue;
         if (!have_tp) {
@@ -3289,6 +3388,32 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
         s_gpu.xf_degenerate++;
         return;
     }
+    {   /* SG1: RECOMP_TEXLOG: the triangle under a floor-ish screen point, with everything that feeds its coordinates */
+        static int tl = -1;
+        static unsigned fp_n, fp_c;
+        if (tl < 0) tl = getenv("RECOMP_TEXLOG") != NULL;
+        if (tl && fp_n < 12 && s_gpu.texs[0].color == 0x0C && s_gpu.texs[1].width == 128 && s_gpu.clip_w) {
+            float px = (float)s_gpu.clip_w * 0.5f, py = (float)s_gpu.clip_h * 0.75f;
+            float ar = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            if (ar != 0.0f) {
+                float w0 = ((b[0] - px) * (c[1] - py) - (b[1] - py) * (c[0] - px)) / ar;
+                float w1 = ((c[0] - px) * (a[1] - py) - (c[1] - py) * (a[0] - px)) / ar;
+                if (w0 >= 0 && w1 >= 0 && w0 + w1 <= 1.0f && (++fp_c % 50) == 0) {
+                    uint32_t q;
+                    fp_n++;
+                    fprintf(stderr, "[FLOORPICK] xf_mode %u composite_set %d inline %d | prog %08X texgen0 %04X texmat_en %08X | tex0 %08X %ux%u fmt %02X lv %u\n", s_gpu.xf_mode & 3, (int)s_gpu.composite_set,
+                            (int)s_gpu.inline_active, s_gpu.rc.stage_program, s_reg[0x03C0 / 4], s_reg[0x0420 / 4], s_gpu.texs[0].offset, s_gpu.texs[0].width, s_gpu.texs[0].height, s_gpu.texs[0].color, s_gpu.texs[0].levels);
+                    for (q = 0; q < 3; q++)
+                        fprintf(stderr, "[FLOORPICK]  v%u scr=(%.1f %.1f %.4f w=%.2f) uv0=(%.4f %.4f %.4f %.4f) uv1=(%.4f %.4f) d0=(%.2f %.2f %.2f %.2f)\n", q, v[q]->pos[0], v[q]->pos[1], v[q]->pos[2], v[q]->pos[3],
+                                v[q]->tex[0][0], v[q]->tex[0][1], v[q]->tex[0][2], v[q]->tex[0][3], v[q]->tex[1][0], v[q]->tex[1][1], v[q]->d0[0], v[q]->d0[1], v[q]->d0[2], v[q]->d0[3]);
+                    for (q = 8; q < 12; q++)
+                        fprintf(stderr, "[FLOORPICK]  attr%u type %u size %u stride %u off %08X imm=(%.3f %.3f %.3f %.3f)\n", q + 1 - 8 + 8, s_gpu.attr[q + 1].type, s_gpu.attr[q + 1].size, s_gpu.attr[q + 1].stride, s_gpu.attr[q + 1].offset,
+                                s_gpu.imm_attr[q + 1][0], s_gpu.imm_attr[q + 1][1], s_gpu.imm_attr[q + 1][2], s_gpu.imm_attr[q + 1][3]);
+                    fflush(stderr);
+                }
+            }
+        }
+    }
     {   /* SG1 debug: how many lit triangles come out black */
         static unsigned xn, xb, xprog, xprogb;
         xn++;
@@ -3296,6 +3421,36 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
         if (v[0]->d0[0] + v[0]->d0[1] + v[0]->d0[2] + v[1]->d0[0] + v[1]->d0[1] + v[1]->d0[2]
               + v[2]->d0[0] + v[2]->d0[1] + v[2]->d0[2] == 0.0f)
             xb++;
+        {   /* SG1: RECOMP_LIGHT_LOG=1: tris grouped by lighting state, to see which state draws black */
+            static int ll = -1;
+            static struct { uint32_t k[8]; unsigned n, blk; } tb[48];
+            static unsigned ln;
+            if (ll < 0) ll = getenv("RECOMP_LIGHT_LOG") != NULL;
+            if (ll) {
+                uint32_t key[8]; int q, f = -1;
+                key[0] = s_gpu.xf_mode & 3; key[1] = s_reg[0x0314 / 4]; key[2] = s_reg[0x03BC / 4];
+                key[3] = s_reg[0x0298 / 4]; key[4] = s_gpu.attr[2].size ? 1u : 0u;
+                key[5] = color_attr()->size ? 1u : 0u;
+                key[6] = (reg_f(0x0A10) + reg_f(0x0A14) + reg_f(0x0A18)) > 0.0f ? 1u : 0u;
+                key[7] = s_gpu.texs[0].valid ? 1u : 0u;
+                for (q = 0; q < 48 && tb[q].n; q++)
+                    if (!memcmp(tb[q].k, key, sizeof key)) { f = q; break; }
+                if (f < 0 && q < 48) { f = q; memcpy(tb[f].k, key, sizeof key); }
+                if (f >= 0) {
+                    tb[f].n++;
+                    if (v[0]->d0[0] + v[0]->d0[1] + v[0]->d0[2] == 0.0f) tb[f].blk++;
+                }
+                if (++ln >= 200000) {
+                    fprintf(stderr, "[LIGHTSTATE] mode light_en mask colmat normals colorattr sceneamb tex0 : tris black\n");
+                    for (q = 0; q < 48 && tb[q].n; q++) {
+                        fprintf(stderr, "[LIGHTSTATE] %u %u %08X %08X %u %u %u %u : %u %u\n", tb[q].k[0], tb[q].k[1], tb[q].k[2],
+                                tb[q].k[3], tb[q].k[4], tb[q].k[5], tb[q].k[6], tb[q].k[7], tb[q].n, tb[q].blk);
+                        tb[q].n = tb[q].blk = 0;
+                    }
+                    ln = 0;
+                }
+            }
+        }
         if (xn >= 300000) {
             if (getenv("RECOMP_FLIP_LOG"))
                 fprintf(stderr, "[XFD0] tris %u black-diffuse %u (%.1f%%) gpu=%d | program tris %u (black v0 %u) | cur: mode %u light_en %u mask %08X ambient %.2f %.2f %.2f L0 amb %.2f %.2f %.2f dif %.2f %.2f %.2f normals %u colmat %08X\n", xn, xb, 100.0 * xb / xn, s_bex != NULL,

@@ -453,8 +453,38 @@ static LONG WINAPI sg1_unhandled(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* SG1: write watch (RECOMP_WATCH=1): the executor arms one guest page read-only; the first write to it
+ * is reported with the guest call stack, then the page is released. Used to find who fills the
+ * vertex colour buffers. */
+volatile uintptr_t g_sg1_watch_page;
+volatile int g_sg1_watch_done;
+void sg1_watch_arm(uint32_t guest_va)
+{
+    DWORD old;
+    uintptr_t host = ((uintptr_t)g_xbox_mem_offset + guest_va) & ~(uintptr_t)0xFFF;
+    if (g_sg1_watch_page || g_sg1_watch_done >= 14) return;
+    if (VirtualProtect((LPVOID)host, 4096, PAGE_READONLY, &old)) g_sg1_watch_page = host;
+}
+
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && g_sg1_watch_page
+        && ep->ExceptionRecord->ExceptionInformation[0] == 1) {
+        uintptr_t fa = ep->ExceptionRecord->ExceptionInformation[1];
+        if (fa >= g_sg1_watch_page && fa < g_sg1_watch_page + 4096) {
+            DWORD old;
+            uintptr_t pg = g_sg1_watch_page;
+            VirtualProtect((LPVOID)pg, 4096, PAGE_READWRITE, &old);
+            g_sg1_watch_page = 0;
+            g_sg1_watch_done++;
+            fprintf(stderr, "[WATCH] write to guest %08X (page %08X) rip rva %llX thread %lu\n", (unsigned)(fa - (uintptr_t)g_xbox_mem_offset),
+                    (unsigned)(pg - (uintptr_t)g_xbox_mem_offset),
+                    (unsigned long long)ep->ContextRecord->Rip - (unsigned long long)(uintptr_t)GetModuleHandleA(NULL), (unsigned long)GetCurrentThreadId());
+            print_guest_context((void *)ep->ContextRecord->Rip);
+            fflush(stderr);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
     /* LOCAL (sg1): report every serious exception, not just access violations.
      * Anything else used to fall through silently and kill the process with no
      * message. 0x406D1388 (thread name), C++ throws (0xE06D7363) and the

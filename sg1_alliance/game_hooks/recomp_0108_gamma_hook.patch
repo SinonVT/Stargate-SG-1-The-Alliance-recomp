@@ -1,0 +1,37 @@
+--- a/src/recomp/gen/recomp_0108.c
++++ b/src/recomp/gen/recomp_0108.c
+@@ -1,3 +1,4 @@
++#include <stdlib.h>
+ #include <stdio.h>
+ /**
+  * Stargate SG-1 - Recompiled code chunk 108
+@@ -10421,6 +10422,15 @@
+     ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+ 
+ loc_0044F160: ;
++    {   /* SG1: D3DDevice_SetGammaRamp(flags, ramp): keep the ramp (256 R, 256 G, 256 B bytes); the window applies it */
++        extern uint8_t g_sg1_gamma[768]; extern volatile int g_sg1_gamma_set;
++        uint32_t _gp = MEM32(esp + 8); int _gi;
++        if (_gp) {
++            for (_gi = 0; _gi < 768; _gi++) g_sg1_gamma[_gi] = MEM8(_gp + _gi);
++            g_sg1_gamma_set = 1;
++        }
++        if (getenv("RECOMP_GAMMA_LOG")) fprintf(stderr, "[GAMMACALL] flags %08X ramp %08X R0 %u R128 %u R255 %u G128 %u B128 %u\n", MEM32(esp + 4), _gp, g_sg1_gamma[0], g_sg1_gamma[128], g_sg1_gamma[255], g_sg1_gamma[256+128], g_sg1_gamma[512+128]);
++    }
+     PUSH32(esp, ebx);
+     PUSH32(esp, ebp);
+     ebp = MEM32(esp + 0x10);
+@@ -29806,6 +29816,13 @@
+     (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+ 
+ loc_00456DBE: ;
++    {   /* SG1: capture the gamma ramp (256 R, 256 G, 256 B bytes) the game writes to the DAC */
++        extern uint8_t g_sg1_gamma[768]; extern volatile int g_sg1_gamma_set;
++        uint32_t _gp = MEM32(esp + 4); int _gi;
++        for (_gi = 0; _gi < 768; _gi++) g_sg1_gamma[_gi] = MEM8(_gp + _gi);
++        g_sg1_gamma_set = 1;
++        if (getenv("RECOMP_GAMMA_LOG")) fprintf(stderr, "[GAMMAHOOK] ramp written: ptr %08X R0 %u R128 %u R255 %u G128 %u B128 %u\n", _gp, g_sg1_gamma[0], g_sg1_gamma[128], g_sg1_gamma[255], g_sg1_gamma[256+128], g_sg1_gamma[512+128]);
++    }
+     edx = MEM32(esp + 4);
+     ecx = MEM32(ecx);
+     PUSH32(esp, esi);

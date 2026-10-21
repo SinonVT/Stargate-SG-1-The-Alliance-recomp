@@ -649,9 +649,15 @@ extern int sg1_cfg_int(const char *k, int def);
 extern void sg1_cfg_set(const char *k, const char *v);
 static int g_aniso = -1;                 /* 1 = off, 2..16 */
 static int g_mips = -1;
-extern int g_sg1_tg0;                    /* defined in the executor: shadow texgen experiment */
+extern int g_sg1_tg0;                          /* defined in the executor: shadow texgen */
+extern int g_sg1_lightfloor;                  /* defined in the executor: ambient floor level 0-4 */
+extern int g_sg1_texmat;                      /* defined in the executor */
+extern int g_sg1_gamma_on;                    /* defined in fb_present.c: apply the game's gamma ramp */
 static int g_dbg_hide;                   /* debug: hide one class of draws (by blend mode), not saved */
 static int g_dbg_tex, g_dbg_log;         /* debug: dump decoded textures to texdump\\, verbose draw logging (both default off) */
+static struct { uint32_t off, fmt, w, h, lv, flt, draws, tris; double area; float uvspan; uint32_t t1f, t1w, t1h, t2f, t2w, prog, nst, fin0, fin1, ocw0, icw0, uvs1, tv; } g_ta[96];
+static int g_ta_n;
+static struct { float z; int have; uint32_t off, fmt, w, h, lv, t1f, t1w, t1h, prog; float u, v, density, uvmax; int blend; uint32_t n; } g_pk[3];
 static int g_haze = 1;                   /* heat-haze / refraction texture shaders (0 = skip those draws) */
 static volatile int g_req_flush, g_req_res;
 static int g_upscale = -1;               /* menu/cfg value (1 = 2x upscale on load) */
@@ -667,6 +673,10 @@ static void settings_init(void)
     e = getenv("RECOMP_MIPMAPS");
     g_mips = e ? !(e[0] == '0') : sg1_cfg_int("mips", 1) != 0;
     g_sg1_tg0 = sg1_cfg_int("shadows", 1) ? 1 : 0;
+    g_sg1_gamma_on = sg1_cfg_int("gamma_ramp", 1) ? 1 : 0;
+    g_sg1_lightfloor = sg1_cfg_int("light_floor", 0);
+    g_sg1_texmat = sg1_cfg_int("texmat", 1) ? 1 : 0;
+    if (g_sg1_lightfloor < 0 || g_sg1_lightfloor > 4) g_sg1_lightfloor = 0;
     e = getenv("RECOMP_DEBUG_TEXDUMP");
     g_dbg_tex = e ? !(e[0] == '0') : sg1_cfg_int("dbg_texdump", 0) != 0;
     e = getenv("RECOMP_DEBUG_LOGS");
@@ -1492,6 +1502,78 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
     r->last_draw = g_frame;
     g_st_draws++;
     g_st_tris += b->count / 3;
+    if (g_dbg_log) {   /* SG1: [TEXAREA] which textures cover the most screen */
+        uint32_t i, tcount = b->count / 3;
+        double area = 0.0;
+        int k, f = -1;
+        for (i = 0; i < tcount; i++) {
+            const float *pa = b->vertices[i * 3].pos, *pb = b->vertices[i * 3 + 1].pos, *pc = b->vertices[i * 3 + 2].pos;
+            float cr = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]);
+            if (pa[3] > 0.0f && pb[3] > 0.0f && pc[3] > 0.0f && cr > -4e6f && cr < 4e6f)
+                area += (double)(cr < 0 ? -cr : cr) * 0.5;
+        }
+        for (k = 0; k < g_ta_n; k++) if (g_ta[k].off == t0.offset && g_ta[k].fmt == t0.color && g_ta[k].w == t0.width) { f = k; break; }
+        if (f < 0 && g_ta_n < 96) { f = g_ta_n++; g_ta[f].off = t0.offset; g_ta[f].fmt = t0.color; g_ta[f].w = t0.width; g_ta[f].h = t0.height; g_ta[f].lv = t0.levels; g_ta[f].flt = t0.filter; g_ta[f].area = 0; g_ta[f].draws = 0; g_ta[f].uvspan = 0; g_ta[f].tris = 0;
+            g_ta[f].t1f = b->tex[1].color; g_ta[f].t1w = b->tex[1].width; g_ta[f].t1h = b->tex[1].height; g_ta[f].t2f = b->tex[2].color; g_ta[f].t2w = b->tex[2].width;
+            g_ta[f].prog = b->rc.stage_program; g_ta[f].nst = b->rc.control & 255u; g_ta[f].fin0 = b->rc.final0; g_ta[f].fin1 = b->rc.final1; g_ta[f].ocw0 = b->rc.color_ocw[0]; g_ta[f].icw0 = b->rc.color_icw[0];
+            g_ta[f].tv = (b->tex_valid[0] ? 1u : 0u) | (b->tex_valid[1] ? 2u : 0u) | (b->tex_valid[2] ? 4u : 0u) | (b->tex_valid[3] ? 8u : 0u); g_ta[f].uvs1 = (uint32_t)(b->vertices[0].tex[1][0] * 1000.0f); }
+        if (f >= 0) {
+            float umin = 1e30f, umax = -1e30f;
+            for (i = 0; i < b->count && i < 3000; i++) { float u = b->vertices[i].tex[0][0]; if (u < umin) umin = u; if (u > umax) umax = u; }
+            g_ta[f].area += area; g_ta[f].draws++; g_ta[f].tris += tcount;
+            if (umax - umin > g_ta[f].uvspan) g_ta[f].uvspan = umax - umin;
+        }
+    }
+    if (g_dbg_log && s && !rs->blend_enable && b->count > 6 && t0.color != 0x1E) {   /* SG1: [PICK] which draw covers the crosshair / lower screen points, and how magnified its texture is */
+        float px[3], py[3];
+        uint32_t i, tcount = b->count / 3;
+        int k;
+        px[0] = s->width * 0.5f; py[0] = s->height * 0.5f;
+        px[1] = s->width * 0.5f; py[1] = s->height * 0.75f;
+        px[2] = s->width * 0.25f; py[2] = s->height * 0.85f;
+        for (i = 0; i < tcount; i++) {
+            const Nv2aXfVertex *va = &b->vertices[i * 3], *vb = &b->vertices[i * 3 + 1], *vc = &b->vertices[i * 3 + 2];
+            float area = (vb->pos[0] - va->pos[0]) * (vc->pos[1] - va->pos[1]) - (vb->pos[1] - va->pos[1]) * (vc->pos[0] - va->pos[0]);
+            if (va->pos[3] <= 0.0f || vb->pos[3] <= 0.0f || vc->pos[3] <= 0.0f || area == 0.0f) continue;
+            for (k = 0; k < 3; k++) {
+                float w0 = ((vb->pos[0] - px[k]) * (vc->pos[1] - py[k]) - (vb->pos[1] - py[k]) * (vc->pos[0] - px[k])) / area;
+                float w1 = ((vc->pos[0] - px[k]) * (va->pos[1] - py[k]) - (vc->pos[1] - py[k]) * (va->pos[0] - px[k])) / area;
+                float w2 = 1.0f - w0 - w1;
+                if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+                    float z = w0 * va->pos[2] + w1 * vb->pos[2] + w2 * vc->pos[2];
+                    if (!g_pk[k].have || z < g_pk[k].z) {
+                        float ua = va->tex[0][0], ub = vb->tex[0][0], uc = vc->tex[0][0], vva = va->tex[0][1], vvb = vb->tex[0][1], vvc = vc->tex[0][1];
+                        float uvc = (ub - ua) * (vvc - vva) - (vvb - vva) * (uc - ua);
+                        float tw = (float)t0.width, th = (float)t0.height;
+                        g_pk[k].have = 1; g_pk[k].z = z; g_pk[k].off = t0.offset; g_pk[k].fmt = t0.color; g_pk[k].w = t0.width; g_pk[k].h = t0.height; g_pk[k].lv = t0.levels;
+                        g_pk[k].t1f = b->tex[1].color; g_pk[k].t1w = b->tex[1].width; g_pk[k].t1h = b->tex[1].height; g_pk[k].prog = b->rc.stage_program;
+                        g_pk[k].u = w0 * ua + w1 * ub + w2 * uc; g_pk[k].v = w0 * vva + w1 * vvb + w2 * vvc;
+                        g_pk[k].density = sqrtf(fabsf(uvc) * tw * th / fabsf(area));
+                        g_pk[k].uvmax = fmaxf(fmaxf(fabsf(ua), fabsf(ub)), fabsf(uc));
+                        g_pk[k].blend = (int)rs->blend_enable; g_pk[k].n = b->count;
+                    }
+                }
+            }
+        }
+    }
+    {   /* SG1: [BLKDRAW] opaque draws whose vertex colours are all black: what feeds them instead? */
+        static unsigned nb, ncheck;
+        if (g_dbg_log && !rs->blend_enable && b->count >= 30 && nb < 60 && (++ncheck % 40) == 0) {
+            uint32_t i, q, n = b->rc.control & 255u; int blk = 1;
+            for (i = 0; i < b->count && i < 300; i++)
+                if (b->vertices[i].d0[0] + b->vertices[i].d0[1] + b->vertices[i].d0[2] > 0.0f) { blk = 0; break; }
+            if (blk) {
+                nb++;
+                fprintf(stderr, "[BLKDRAW] n=%u rc=%u stages=%u prog=%08X fin=%08X/%08X ctl=%08X d1v0=(%.2f %.2f %.2f) z %u\n", b->count, b->use_rc, n, b->rc.stage_program,
+                        b->rc.final0, b->rc.final1, b->rc.control, b->vertices[0].d1[0], b->vertices[0].d1[1], b->vertices[0].d1[2], rs->depth_test_enable);
+                for (q = 0; q < 4; q++)
+                    fprintf(stderr, "[BLKDRAW]   tex%u valid=%d off=%08X %ux%u fmt=%02X  t(v0)=(%.2f %.2f)\n", q, b->tex_valid[q], b->tex[q].offset, b->tex[q].width, b->tex[q].height, b->tex[q].color, b->vertices[0].tex[q][0], b->vertices[0].tex[q][1]);
+                for (q = 0; q < n && q < 4; q++)
+                    fprintf(stderr, "[BLKDRAW]   st%u icw %08X ocw %08X | aicw %08X aocw %08X | f0 %08X\n", q, b->rc.color_icw[q], b->rc.color_ocw[q], b->rc.alpha_icw[q], b->rc.alpha_ocw[q], b->rc.factor0[q]);
+                fflush(stderr);
+            }
+        }
+    }
     {   /* SG1: particle / effect draws (additive or alpha-blended, small textured quads) */
         static unsigned nf; static uint32_t seenoff[200]; static int nseenf;
         if (g_dbg_log && (nf < 40 || (nf < 120 && rs->blend_src == 0x0302 && rs->blend_dst == 0x0303 && t0.color == 0x0C)) && rs->blend_enable && t0.width >= 16 && b->count >= 6 && b->count <= 1500) {
@@ -1733,7 +1815,14 @@ static void bm_text(int item, char *b, int n)
         else snprintf(b, n, "Anisotropic filter  < %dx >", g_aniso);
     } else if (item == 2)
         snprintf(b, n, "Mipmaps             < %s >", g_mips ? "on" : "off");
-    else if (item == 8) {
+    else if (item == 11) {
+        snprintf(b, n, "Floor texgen fix    < %s >", g_sg1_texmat ? "on" : "off");
+    } else if (item == 10) {
+        static const char *ln[5] = { "off", "low", "medium", "high", "max" };
+        snprintf(b, n, "Dark area lift      < %s >", ln[g_sg1_lightfloor]);
+    } else if (item == 9) {
+        snprintf(b, n, "Game gamma/bright.  < %s >", g_sg1_gamma_on ? "on" : "off");
+    } else if (item == 8) {
         snprintf(b, n, "Player shadows      < %s >", g_sg1_tg0 ? "on" : "off");
     } else if (item == 7) {
         static const char *nm[11] = { "off", "ONE / INV_SRC_COLOR", "ZERO / INV_SRC_COLOR", "DST_COLOR / SRC_COLOR", "SRC_ALPHA / INV_SRC_ALPHA", "SRC_ALPHA / ONE", "all opaque draws", "shadow draws painted magenta", "shadow: ignore fade stages", "shadow: show raw map", "shadow: show UV as colour" };
@@ -1767,6 +1856,17 @@ static void bm_change(int item, int dir)
         g_mips = !g_mips;
         sg1_cfg_set("mips", g_mips ? "1" : "0");
         g_req_flush = 1;
+    } else if (item == 11) {
+        g_sg1_texmat = !g_sg1_texmat;
+        sg1_cfg_set("texmat", g_sg1_texmat ? "1" : "0");
+    } else if (item == 10) {
+        g_sg1_lightfloor += dir > 0 ? 1 : -1;
+        if (g_sg1_lightfloor < 0) g_sg1_lightfloor = 4;
+        if (g_sg1_lightfloor > 4) g_sg1_lightfloor = 0;
+        { char v[8]; snprintf(v, sizeof v, "%d", g_sg1_lightfloor); sg1_cfg_set("light_floor", v); }
+    } else if (item == 9) {
+        g_sg1_gamma_on = !g_sg1_gamma_on;
+        sg1_cfg_set("gamma_ramp", g_sg1_gamma_on ? "1" : "0");
     } else if (item == 8) {
         g_sg1_tg0 = !g_sg1_tg0;
         sg1_cfg_set("shadows", g_sg1_tg0 ? "1" : "0");
@@ -1840,8 +1940,39 @@ static void dbg_dump_small_rts(void)
     if (did) { cnt++; lastf = (unsigned)g_frame; }
 }
 
+static void dbg_dump_texarea(void)
+{
+    static unsigned fl;
+    int k, j, top[8], nt = 0;
+    if (g_dbg_log && ++fl % 90 == 0) {
+        for (k = 0; k < 3; k++)
+            if (g_pk[k].have)
+                fprintf(stderr, "[PICK] pt%d tex0 %08X fmt=%02X %ux%u lv=%u | uv=(%.3f %.3f) uvmax=%.2f texels/pixel=%.3f blend=%d verts=%u | tex1 fmt=%02X %ux%u prog=%08X\n", k, g_pk[k].off, g_pk[k].fmt, g_pk[k].w, g_pk[k].h, g_pk[k].lv,
+                        (double)g_pk[k].u, (double)g_pk[k].v, (double)g_pk[k].uvmax, (double)g_pk[k].density, g_pk[k].blend, g_pk[k].n, g_pk[k].t1f, g_pk[k].t1w, g_pk[k].t1h, g_pk[k].prog);
+    }
+    if (g_dbg_log) memset(g_pk, 0, sizeof g_pk);
+    if (!g_dbg_log || fl % 300 != 0) { return; }
+    for (j = 0; j < 8; j++) {
+        int best = -1;
+        for (k = 0; k < g_ta_n; k++) {
+            int used = 0, q;
+            for (q = 0; q < nt; q++) if (top[q] == k) used = 1;
+            if (!used && (best < 0 || g_ta[k].area > g_ta[best].area)) best = k;
+        }
+        if (best < 0) break;
+        top[nt++] = best;
+        fprintf(stderr, "[TEXAREA] off=%08X fmt=%02X %ux%u levels=%u filter=%08X area=%.0f px draws=%u tris=%u uvspan0=%.2f\n", g_ta[best].off, g_ta[best].fmt,
+                g_ta[best].w, g_ta[best].h, g_ta[best].lv, g_ta[best].flt, g_ta[best].area, g_ta[best].draws, g_ta[best].tris, (double)g_ta[best].uvspan);
+        fprintf(stderr, "[TEXAREA]    tex1 fmt=%02X %ux%u tex2 fmt=%02X w=%u valid=%X stages=%u prog=%08X fin=%08X/%08X st0 icw %08X ocw %08X\n", g_ta[best].t1f, g_ta[best].t1w, g_ta[best].t1h, g_ta[best].t2f, g_ta[best].t2w,
+                g_ta[best].tv, g_ta[best].nst, g_ta[best].prog, g_ta[best].fin0, g_ta[best].fin1, g_ta[best].icw0, g_ta[best].ocw0);
+    }
+    fprintf(stderr, "[TEXAREA] ---\n");
+    g_ta_n = 0;
+}
+
 static void be_flip(void)
 {
+    dbg_dump_texarea();
     dbg_dump_small_rts();
     static int note_done;
     if (!note_done) { note_done = 1; res_note(); }
@@ -1908,6 +2039,6 @@ void sg1_gpu_backend_install(void)
     extern int (*xbox_fb_hires_hook)(uint32_t, const uint32_t **, uint32_t *, uint32_t *);
     nv2a_backend_register_ex(&g_backend);
     xbox_fb_hires_hook = sg1_hires_grab;
-    g_sg1_bm_count = 9; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
+    g_sg1_bm_count = 12; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
     fprintf(stderr, "[GPU11] D3D11 back end registered\n");
 }
