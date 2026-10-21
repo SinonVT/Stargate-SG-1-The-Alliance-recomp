@@ -39,8 +39,9 @@ if done:
 else:
     os.makedirs(gen, exist_ok=True)
     os.makedirs(os.path.join(root, 'tools', 'xbe_parser', 'output'), exist_ok=True)
-    run('1/5 Parse the XBE', [py, '-m', 'tools.xbe_parser', xbe, '--json', os.path.join(root, 'tools', 'xbe_parser', 'output', 'default_analysis.json')])
-    run('2/5 Disassemble (a few minutes)', [py, '-m', 'tools.disasm', xbe, '--text-only'])
+    aj = os.path.join(root, 'tools', 'xbe_parser', 'output', 'default_analysis.json')
+    run('1/5 Parse the XBE', [py, '-m', 'tools.xbe_parser', xbe, '--json', aj])
+    run('2/5 Disassemble (a few minutes)', [py, '-m', 'tools.disasm', xbe, '--text-only', '--analysis-json', aj])
     run('3/5 Identify library functions', [py, '-m', 'tools.func_id', xbe, '-v'])
     run('4/5 ABI analysis', [py, '-m', 'tools.abi_analysis', xbe, '-v'])
     run('5/5 Recompile to C (several minutes)', [py, '-m', 'tools.recomp', xbe, '--all', '--split', '250', '--gen-dir', gen])
