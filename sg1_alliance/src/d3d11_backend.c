@@ -670,6 +670,7 @@ static struct { uint32_t off, fmt, w, h, lv, flt, draws, tris; double area; floa
 static int g_ta_n;
 extern int g_sg1_hdpack;
 extern int g_sg1_fov;
+extern int g_sg1_whitepct;
 int g_sg1_cube = 1;   /* Debug menu: sample cube maps (off = neutral white, the old behaviour) */
 static struct { float z; int have; uint32_t off, fmt, w, h, lv, t1f, t1w, t1h, prog; float u, v, density, uvmax; int blend; uint32_t n; } g_pk[3];
 static int g_haze = 1;                   /* heat-haze / refraction texture shaders (0 = skip those draws) */
@@ -693,6 +694,8 @@ static void settings_init(void)
     g_sg1_hdpack = sg1_cfg_int("hdpack", 1) ? 1 : 0;
     g_sg1_custom = sg1_cfg_int("customtex", 0) ? 1 : 0;
     g_sg1_fov = sg1_cfg_int("fov", 75);
+    g_sg1_whitepct = sg1_cfg_int("whitepct", 10);
+    if (g_sg1_whitepct < 0 || g_sg1_whitepct > 100) g_sg1_whitepct = 10;
     if (g_sg1_fov < 60 || g_sg1_fov > 120) g_sg1_fov = 75;
     if (g_sg1_lightfloor < 0 || g_sg1_lightfloor > 4) g_sg1_lightfloor = 0;
     e = getenv("RECOMP_DEBUG_TEXDUMP");
@@ -717,6 +720,7 @@ static int tex_want_mips(void)
 static const GUID sg1_CLSID_WICFactory = {0xcacaf262,0x9370,0x4615,{0xa1,0x3b,0x9f,0x55,0x39,0xda,0x4c,0x0a}};
 static const GUID sg1_IID_WICFactory   = {0xec5ec8a9,0xc395,0x4314,{0x9c,0x77,0x54,0xd7,0xa9,0x35,0xff,0x70}};
 static const GUID sg1_PF_BGRA          = {0x6fddc324,0x4e03,0x4bfe,{0xb1,0x85,0x3d,0x77,0x76,0x8d,0xc9,0x0f}};
+int g_sg1_whitepct = 10;   /* Debug menu: brightness (percent) given to props whose vertex colours are all white */
 int g_sg1_fov = 75;       /* Menu: field of view, sent to the game with the FOV console command */
 int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
 static unsigned g_hd_loaded;
@@ -1443,6 +1447,24 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
         if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mt, 0, &m)))
             return;
         memcpy((uint8_t *)m.pData + g_vb_pos, b->vertices, bytes);
+        {   /* SG1: a lit prop whose vertex colours were never computed is pure white (the engine only fills them
+             * when a light near it changes, e.g. you shoot next to it): draw it with a moderate level instead of full bright */
+            static int wf = -1;
+            if (wf < 0) { const char *e = getenv("RECOMP_WHITEFIX"); wf = !(e && e[0] == '0'); }
+            if (wf && b->use_rc && ((b->rc.stage_program & 0xFFFFFu) == 0x18C21u || (b->rc.stage_program & 0xFFFFFu) == 0x00001u) && !rs->blend_enable && b->count >= 30 && b->count <= 3000 && b->vertices[0].pos[3] > 1.5f) {   /* 0x1 = single-texture prop with vertex lighting (the white pillar on DM-WorstCaseScenario); w > 1.5 = a perspective 3D draw, not a menu / HUD quad */
+                const Nv2aXfVertex *sv = b->vertices;
+                uint32_t vi, allw = 1;
+                for (vi = 0; vi < b->count; vi++)
+                    if (sv[vi].d0[0] < 0.995f || sv[vi].d0[1] < 0.995f || sv[vi].d0[2] < 0.995f) { allw = 0; break; }
+                if (allw) {
+                    Nv2aXfVertex *dv = (Nv2aXfVertex *)((uint8_t *)m.pData + g_vb_pos);
+                    static unsigned nwf;
+                    float lvl = (float)g_sg1_whitepct / 100.0f;
+                    for (vi = 0; vi < b->count; vi++) { dv[vi].d0[0] *= lvl; dv[vi].d0[1] *= lvl; dv[vi].d0[2] *= lvl; }
+                    if (nwf < 6) { nwf++; fprintf(stderr, "[WHITEFIX] f%llu n=%u tex0=%08X %ux%u: all-white vertex colours scaled down\n", (unsigned long long)g_frame, b->count, b->tex[0].offset, b->tex[0].width, b->tex[0].height); }
+                }
+            }
+        }
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
         off = g_vb_pos;
         g_vb_pos += bytes;
@@ -1992,6 +2014,8 @@ static void bm_text(int item, char *b, int n)
         else snprintf(b, n, "Anisotropic filter  < %dx >", g_aniso);
     } else if (item == 2)
         snprintf(b, n, "Mipmaps             < %s >", g_mips ? "on" : "off");
+    else if (item == 15)
+        snprintf(b, n, "White prop level    < %d%% >", g_sg1_whitepct);
     else if (item == 14)
         snprintf(b, n, "Field of view       < %d >", g_sg1_fov);
     else if (item == 13)
@@ -2039,6 +2063,12 @@ static void bm_change(int item, int dir)
         g_mips = !g_mips;
         sg1_cfg_set("mips", g_mips ? "1" : "0");
         g_req_flush = 1;
+    } else if (item == 15) {
+        g_sg1_whitepct += dir > 0 ? 5 : -5;
+        if (g_sg1_whitepct < 0) g_sg1_whitepct = 0;
+        if (g_sg1_whitepct > 100) g_sg1_whitepct = 100;
+        snprintf(v, sizeof v, "%d", g_sg1_whitepct);
+        sg1_cfg_set("whitepct", v);
     } else if (item == 14) {
         extern void mkb_type_command(const char *cmd, int delay_ms);
         char cmd[32];
@@ -2232,6 +2262,6 @@ void sg1_gpu_backend_install(void)
     extern int (*xbox_fb_hires_hook)(uint32_t, const uint32_t **, uint32_t *, uint32_t *);
     nv2a_backend_register_ex(&g_backend);
     xbox_fb_hires_hook = sg1_hires_grab;
-    g_sg1_bm_count = 15; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
+    g_sg1_bm_count = 16; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
     fprintf(stderr, "[GPU11] D3D11 back end registered\n");
 }

@@ -291,7 +291,7 @@ static int mn_key_edge(int vk, int *prev)
  * (d3d11_backend.c), 900 = open the debug page, 901 = back to the main page. */
 static int s_mn_page;
 static const int s_mn_main[] = { 0, 1, 2, 114, 113, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
-static const int s_mn_dbg[]  = { 111, 112, 105, 106, 107, 901 };
+static const int s_mn_dbg[]  = { 115, 111, 112, 105, 106, 107, 901 };
 
 static int mn_items(void) { return s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
 static int mn_code(int i) { return s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
