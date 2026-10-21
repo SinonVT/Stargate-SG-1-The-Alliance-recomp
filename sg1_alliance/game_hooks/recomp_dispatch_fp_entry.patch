@@ -1,0 +1,25 @@
+--- a/recomp_dispatch.c
++++ b/recomp_dispatch.c
+@@ -16,6 +16,14 @@
+     uint32_t xbox_va;
+     recomp_func_t func;
+ } recomp_entry_t;
++
++/* SG1: 0x003EDE94 is "fstp st(0)" falling into sub_003EDE96 (fstp st(0); fldz; ret),
++ * an entry point the CRT pow() jump table uses but function detection missed. */
++static void sg1_fp_003EDE94(void)
++{
++    g_fp_top = (g_fp_top + 1u) & 7u;   /* fstp st(0) */
++    sub_003EDE96();
++}
+ 
+ static const recomp_entry_t g_recomp_table[] = {
+     { 0x00011000u, (recomp_func_t)sub_00011000 },
+@@ -15139,6 +15147,7 @@
+     { 0x003EDD90u, (recomp_func_t)sub_003EDD90 },
+     { 0x003EDDF7u, (recomp_func_t)sub_003EDDF7 },
+     { 0x003EDE88u, (recomp_func_t)sub_003EDE88 },
++    { 0x003EDE94u, (recomp_func_t)sg1_fp_003EDE94 },
+     { 0x003EDE96u, (recomp_func_t)sub_003EDE96 },
+     { 0x003EDE9Du, (recomp_func_t)sub_003EDE9D },
+     { 0x003EDEA2u, (recomp_func_t)sub_003EDEA2 },

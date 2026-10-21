@@ -4,27 +4,41 @@ A work-in-progress native Windows port of the unreleased Xbox game *Stargate SG-
 
 **No game files, no generated game code and no executables are in this repository.** You need your own copy of the game, and you generate the recompiled code yourself from your own `default.xbe`.
 
+![Stargate SG-1: The Alliance running natively on Windows](docs/screenshots/sg1_alliance_recomp.png)
+
+*In-game screenshot: DM map with player shadow, cube-map lighting and the HD texture pack.*
+
 ## Status
 Boots Unreal Engine 2, shows the animated main menu, has audio, keyboard, mouse and gamepad input, profile creation, and loads levels (Deathmatch maps are walkable). Player (projected) shadows render, the game's Brightness/Contrast/Gamma keys work, floor and wall textures sample correctly, and an optional HD texture pack swaps the game's reduced textures for the original full-size art from its own packages. Menu speed is about 25-35 fps on a GTX 750. Known gaps: some maps are missing from the dump, black windows in room meshes, levels can look dark in places (many static meshes have unbaked, zero vertex lighting in this unfinished build; the "Dark area lift" option compensates), fire and brazier emitters are frozen, anisotropic filtering or high resolutions can corrupt lighting, a rare crash in the object list, game-mode editing screens are incomplete.
 
 ## Layout
 - Repository root (`src/`, `include/`, `docs/` ...) - the xboxrecomp toolkit with our changes (kernel/NV2A executor, input, video). The original toolkit README is kept as `README-xboxrecomp.md`.
 - `sg1_alliance/` - the game project: `src/main.c`, `src/d3d11_backend.c` (D3D11 back end), `src/recomp_manual.c`, `src/xnet_shim.c`, `CMakeLists.txt`, `tools/dbglaunch.c`.
-- `sg1_alliance/game_hooks/` - small patches to the *generated* code (mouse hook in `recomp_0047.c`, gamma ramp capture in `recomp_0108.c`, D3D kickoff in `recomp_0109.c`; the kickoff one is off by default) and `apply_hooks.py`, which applies them.
+- `sg1_alliance/setup_sg1.py` / `setup_sg1.bat` - one-step setup (generate, patch, build).
+- `sg1_alliance/game_hooks/` - patches to the *generated* code (keyboard and mouse look in `recomp_0047.c`, menu mouse in `recomp_0043.c`, gamma ramp in `recomp_0108.c`, XNet shim hooks in `recomp_0103.c`, two crash workarounds in `recomp_0008.c`, a missing FPU entry in `recomp_dispatch.c`, D3D kickoff in `recomp_0109.c` which is off by default) and `apply_hooks.py`, which applies them.
 - `sg1_alliance/tools/make_hdpack.py` - builds the HD texture pack from your own game files (see HD texture pack below).
 - `sg1_alliance/tools/patches/sg1patch.py` - fixes a bug in the game's own script files in your copy of the game (see its README).
 
-## Building
-1. Extract the game from your own disc image so you have `default.xbe` and `System/`.
-2. Run the xboxrecomp pipeline on `default.xbe` to generate `sg1_alliance/src/recomp/gen/` (see the xboxrecomp docs). Then, from the `sg1_alliance` folder, apply our patches to the generated code with `python game_hooks/apply_hooks.py` (needs only Python 3; it patches `recomp_0047.c`, `recomp_0108.c` and `recomp_0109.c`, skips anything already applied, and `--check` just reports the state).
-3. Nothing to edit for paths: the exe looks for `default.xbe` in its own folder and its parent folders (or in `RECOMP_GAME_DIR` if set).
-4. In a VS 2022 x64 Native Tools prompt:
+## Quick start
+You need: Windows 10/11, [Visual Studio 2022](https://visualstudio.microsoft.com/) (Desktop development with C++, which includes CMake), [Python 3](https://www.python.org/downloads/) (tick "Add to PATH"), Git, and your own copy of the game extracted from your disc image (a folder containing `default.xbe` and `System\`).
+
+1. Clone this repo: `git clone https://github.com/SinonVT/Stargate-SG-1-The-Alliance-recomp` and open a **x64 Native Tools Command Prompt for VS 2022** in it.
+2. Run one command (about 10-30 minutes the first time):
 
 ```
-cd sg1_alliance
-cmake -S . -B build -DXBOXRECOMP_DIR=..
-cmake --build build --config Release
+sg1_alliance\setup_sg1.bat "C:\path\to\your game folder" --build
 ```
+
+It generates the recompiled code from your `default.xbe`, applies our fixes to it, then builds. If something fails it stops and says which step; fix that and run the same line again (finished steps are skipped).
+3. Start the game: `sg1_alliance\build\Release\dbglaunch.exe sg1_alliance_recomp.exe`. The exe finds `default.xbe` in its own folder or a parent folder; if your game is elsewhere set `RECOMP_GAME_DIR` to its folder first.
+4. Optional: the HD texture pack (below) and `sg1_alliance\tools\patches\sg1patch.py` (fixes a bug in the game's own script files). The Insert key opens the in-game settings.
+
+Do not try to run the pieces by hand unless you have to: the generated code must be patched with `game_hooks\apply_hooks.py` (setup does this) or the keyboard, menu mouse, gamma and network pieces will be missing. `python sg1_alliance\game_hooks\apply_hooks.py --check` shows whether they are applied.
+
+Common problems: "capstone not found" (setup installs it; if pip is blocked run `pip install capstone`), "cmake not found" (use the VS Native Tools prompt, not a normal one), mismatched Python (use `py -3`), and a black or empty window (the exe could not find `default.xbe`; see step 3).
+
+## Building by hand
+Only if you did not use the script: run the xboxrecomp pipeline on your `default.xbe` (`tools.xbe_parser --json`, `tools.disasm --text-only`, `tools.func_id`, `tools.abi_analysis`, then `python -m tools.recomp default.xbe --all --split 250 --gen-dir sg1_alliance/src/recomp/gen`), run `python sg1_alliance/game_hooks/apply_hooks.py`, then `cd sg1_alliance`, `cmake -S . -B build -DXBOXRECOMP_DIR=..`, `cmake --build build --config Release`.
 
 ## HD texture pack
 The pack is built from your own game files, so it is not in the repository (about 850 MB).
