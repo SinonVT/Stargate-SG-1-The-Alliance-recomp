@@ -1,0 +1,14 @@
+--- a/recomp_0115.c
++++ b/recomp_0115.c
+@@ -6266,7 +6266,10 @@
+     eax = MEM32(esi);
+     ecx = esi;
+     { uint32_t _icall_esp = g_esp;
+-    { uint32_t _icall_target = MEM32(eax + 0x18); PUSH32(esp, 0x004A657Cu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x004A6579u); } /* indirect call */
++    { uint32_t _icall_target = MEM32(eax + 0x18);
++      if (_icall_target == 0x003E5501u) {   /* SG1: the object is already being destroyed (its slot is _purecall); calling it ends the game with R6025 */
++          static int _sg1_pc; if (_sg1_pc++ < 20) { fprintf(stderr, "[SG1] DSound timeout path: skipped pure virtual call on obj=%08X\n", esi); fflush(stderr); }
++      } else { PUSH32(esp, 0x004A657Cu); RECOMP_ICALL_SAFE_AT(_icall_target, _icall_esp, 0x004A6579u); } } /* indirect call */
+     }
+ 
+ loc_004A657C: ;

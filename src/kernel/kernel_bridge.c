@@ -2412,6 +2412,11 @@ static void bridge_KeBugCheck(void)
     fprintf(stderr, "  [KERNEL] *** KeBugCheck: code=0x%08X ***\n",
             STACK_ARG(0));
     fflush(stderr);
+    {   /* SG1: where did the game die? (R6025 pure virtual call etc.) print the guest stack, return addresses first */
+        int _i; fprintf(stderr, "[SG1] BugCheck guest stack:");
+        for (_i = 0; _i < 40; _i++) fprintf(stderr, " %08X", STACK_ARG(_i));
+        fprintf(stderr, "\n"); fflush(stderr);
+    }
     g_eax = 0;
 }
 

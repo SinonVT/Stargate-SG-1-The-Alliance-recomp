@@ -1,0 +1,27 @@
+--- a/recomp_0114.c
++++ b/recomp_0114.c
+@@ -21988,6 +21988,12 @@
+     goto loc_004A3F63;
+ 
+ loc_004A3F43: ;
++    if (edi >= 0xFD000000u || edi < 0x1000u) {   /* SG1: corrupt list node (hardware-space pointer): empty the list instead of calling through it */
++        static int _sg1_l1; if (_sg1_l1++ < 5) { fprintf(stderr, "[SG1] audio release list: bad node %08X in list at %08X -> list emptied\n", edi, ebx); fflush(stderr); }
++        MEM32(ebx) = ebx; MEM32(ebx + 4) = ebx;
++        MEM32(esi + 0x84) = MEM32(esi + 0x84) - 0;
++        goto loc_004A3F67;
++    }
+     ecx = edi + -76;
+     eax = MEM32(ecx);
+     { uint32_t _icall_esp = g_esp;
+@@ -22047,6 +22053,11 @@
+     if (CMP_EQ(_fa, _fb)) goto loc_004A3F98; /* je: equal / zero */
+ 
+ loc_004A3F8E: ;
++    if (eax >= 0xFD000000u || eax < 0x1000u) {   /* SG1: corrupt list node (hardware-space pointer, e.g. FE000284): empty the list */
++        static int _sg1_l2; if (_sg1_l2++ < 5) { fprintf(stderr, "[SG1] audio release list: bad node %08X in list at %08X -> list emptied\n", eax, edi); fflush(stderr); }
++        MEM32(edi) = edi; MEM32(edi + 4) = edi;
++        goto loc_004A3F98;
++    }
+     ecx = eax + -84;
+     eax = MEM32(ecx);
+     { uint32_t _icall_esp = g_esp;
