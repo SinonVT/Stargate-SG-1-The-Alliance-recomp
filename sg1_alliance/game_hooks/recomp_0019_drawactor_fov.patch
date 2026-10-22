@@ -1,0 +1,20 @@
+--- a/recomp_0019.c
++++ b/recomp_0019.c
+@@ -7586,6 +7586,17 @@
+     }
+ 
+ loc_001022E4: ;
++    { /* SG1 ultrawide: DrawActor's DisplayFOV is horizontal; HUD widgets (90), the gun and hands are placed for 4:3.
++       * Widen it so the vertical extent stays what 4:3 gave. */
++      extern int g_sg1_mode_w, g_sg1_mode_h;
++      if (g_sg1_mode_w > 0 && g_sg1_mode_h > 0) {
++        float _a = (float)g_sg1_mode_w / (float)g_sg1_mode_h, _f = MEMF(esp + 0xC);
++        if (_a > 1.4f && _f > 1.0f && _f < 170.0f) {
++            float _t = tanf(_f * 0.5f * 0.017453292f) * (_a * 0.75f);
++            MEMF(esp + 0xC) = 2.0f * atanf(_t) * 57.29578f;
++        }
++      }
++    }
+     edx = MEM32(esp + 0x20);
+     eax = MEM32(esp + 0xC);
+     ecx = MEM32(esp + 0x10);

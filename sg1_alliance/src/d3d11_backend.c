@@ -2053,10 +2053,10 @@ int sg1_hires_grab(uint32_t va, const uint32_t **pix, uint32_t *w, uint32_t *h)
     ID3D11Texture2D *mt;
     Rt *r;
     uint32_t y;
-    if (!g_dev || g_init_failed || sg1_res_scale() < 1.01f) return 0;
+    if (!g_dev || g_init_failed) return 0;
     r = rt_find(va);
     if (!r) { static int hm; if (hm < 40 || (hm % 100) == 0) fprintf(stderr, "[HIRES-MISS] frame %u flip va %08X not a render target (n=%d)\n", (unsigned)g_frame, va, hm); hm++; }
-    if (!r || r->pw == r->w) return 0;
+    if (!r || (r->pw == r->w && r->w == 640)) return 0;   /* 640-wide frames use the normal path; wider modes (SETRES) always need this one */
     if (cap < (size_t)r->pw * r->ph) {
         free(buf); cap = (size_t)r->pw * r->ph;
         buf = (uint32_t *)malloc(cap * 4);
@@ -2071,6 +2071,18 @@ int sg1_hires_grab(uint32_t va, const uint32_t **pix, uint32_t *w, uint32_t *h)
     return 1;
 }
 
+extern int g_sg1_mode_w, g_sg1_mode_h;
+/* Hor+: the menu FOV is the 4:3 value; on a wider mode raise it so the vertical view stays the same. */
+static int sg1_hor_plus(int fov)
+{
+    double a = g_sg1_mode_h > 0 ? (double)g_sg1_mode_w / (double)g_sg1_mode_h : 4.0 / 3.0;
+    if (a > 1.4 && fov > 0 && fov < 170) {
+        double h = tan(fov * 0.5 * 3.14159265358979 / 180.0) * (a * 0.75);
+        fov = (int)(2.0 * atan(h) * 180.0 / 3.14159265358979 + 0.5);
+        if (fov > 150) fov = 150;
+    }
+    return fov;
+}
 extern void xbox_FramebufferWindowSetNote(const char *text);
 static void res_note(void)
 {
@@ -2159,7 +2171,7 @@ static void bm_change(int item, int dir)
         if (g_sg1_fov > 120) g_sg1_fov = 120;
         snprintf(v, sizeof v, "%d", g_sg1_fov);
         sg1_cfg_set("fov", v);
-        snprintf(cmd, sizeof cmd, "FOV %d", g_sg1_fov);
+        snprintf(cmd, sizeof cmd, "FOV %d", sg1_hor_plus(g_sg1_fov));
         mkb_type_command(cmd, 700);   /* typed into the game console once you stop pressing */
     } else if (item == 13) {
         g_sg1_hdpack = !g_sg1_hdpack;
@@ -2282,6 +2294,17 @@ static void be_flip(void)
     dbg_dump_small_rts();
     static int note_done;
     if (!note_done) { note_done = 1; res_note(); }
+    {   /* SG1 ultrawide: when SETRES changes the aspect, re-send the FOV (Hor+) so the vertical view stays as at 4:3 */
+        static int lw = 640, lh = 480, settle;
+        if (g_sg1_mode_w != lw || g_sg1_mode_h != lh) { lw = g_sg1_mode_w; lh = g_sg1_mode_h; settle = 120; }
+        if (settle && --settle == 0) {
+            extern void mkb_type_command(const char *cmd, int delay_ms);
+            char fc[32];
+            snprintf(fc, sizeof fc, "FOV %d", sg1_hor_plus(g_sg1_fov));
+            fprintf(stderr, "[SG1-FOV] mode %dx%d -> %s\n", lw, lh, fc);
+            mkb_type_command(fc, 300);
+        }
+    }
     static DWORD last_ms;
     DWORD now = GetTickCount();
     g_frame++;

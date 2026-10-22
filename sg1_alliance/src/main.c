@@ -42,6 +42,7 @@
 
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
+int g_sg1_mode_w = 640, g_sg1_mode_h = 480;   /* last display mode the game selected (set by the FindMode hook) */
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -682,6 +683,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     g_xbox_mem_offset = xbox_GetMemoryOffset();
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
+
+    {   /* SG1 ultrawide: the game's D3D library has a table of display modes (12-byte rows at 0x45F280, key /
+         * size / flags). Only rows whose key matches the current video setup are offered, and the 720p row never matched,
+         * so SETRES could not go above 720x480. RECOMP_MODE_ROW=WxH turns the 1280x720 row into a usable WxH mode by
+         * giving it the key of the 480p rows (which do match). */
+        if (getenv("RECOMP_AV_HDTV")) {
+            /* FindMode requires key bit25 == request flag bit8; the engine sets bit8 for HD sizes. */
+            uint32_t *t = (uint32_t *)((uint8_t *)g_xbox_mem_offset + 0x45F280u);
+            for (int i = 0; i < 40; i++, t += 3) {
+                unsigned w = t[1] & 0xFFFFu;
+                if (w >= 1280 && w <= 4096 && (t[0] & 0xFFFFu) == 0x0104u) {
+                    t[0] |= 0x02000000u;
+                }
+            }
+        }
+        const char *mr = getenv("RECOMP_MODE_ROW");
+        unsigned mw = 0, mh = 0;
+        if (mr && sscanf(mr, "%ux%u", &mw, &mh) == 2 && mw >= 640 && mw <= 4096 && mh >= 480 && mh <= 2160) {
+            uint32_t *row = (uint32_t *)((uint8_t *)g_xbox_mem_offset + 0x45F2F8u);
+            if (!getenv("RECOMP_AV_HDTV")) row[0] = 0x00480104u;   /* with HDTV bits the row keeps the working 720p key (bit25 set) */
+            row[1] = (mh << 16) | mw;
+        }
+    }
 
     /* Bring up the emulated APU.
      *

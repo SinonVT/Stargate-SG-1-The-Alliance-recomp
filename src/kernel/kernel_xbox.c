@@ -11,7 +11,16 @@
 
 #include "kernel.h"
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
+
+/* SG1: with RECOMP_AV_HDTV set (ultrawide / SETRES launchers) the XDK also sees the 720p/1080i/480p user video bits. */
+static ULONG sg1_video_flags(void)
+{
+    return getenv("RECOMP_AV_HDTV") ? (ULONG)(XC_VIDEO_FLAGS_WIDESCREEN | XC_VIDEO_FLAGS_HDTV | 0x000E0000u)
+                                    : (ULONG)(XC_VIDEO_FLAGS_WIDESCREEN | XC_VIDEO_FLAGS_HDTV);
+}
+
 
 /* ============================================================================
  * Exported Data Objects
@@ -222,7 +231,7 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
     case XC_VIDEO:
         /* NTSC with widescreen and HDTV support enabled */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = XC_VIDEO_FLAGS_WIDESCREEN | XC_VIDEO_FLAGS_HDTV;
+            *(PULONG)Value = sg1_video_flags();
             if (Type) *Type = 4; /* REG_DWORD */
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }
@@ -313,7 +322,7 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         memcpy(blk + 0x28, &s_tz.std_bias, 4);
         memcpy(blk + 0x2C, &s_tz.dlt_bias, 4);
         { ULONG v = 1; memcpy(blk + 0x30, &v, 4); }                       /* English */
-        { ULONG v = XC_VIDEO_FLAGS_WIDESCREEN | XC_VIDEO_FLAGS_HDTV; memcpy(blk + 0x34, &v, 4); }
+        { ULONG v = sg1_video_flags(); memcpy(blk + 0x34, &v, 4); }
         /* 0x58 is MiscFlags (0); DvdRegion is the last field, at 0x5C. */
         { ULONG v = 1; memcpy(blk + 0x5C, &v, 4); }                       /* DVD region 1 */
         if (Type) *Type = 3;

@@ -1473,9 +1473,12 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
          * HDTV pack keeps 480p/720p available to titles that offer them;
          * NTSC-M and 60Hz are the North American retail default, and match
          * the region reported by ExQueryNonVolatileSetting. */
-        *Result = AV_PACK_HDTV
+        { /* SG1: D3D takes the HDTV capability bits (0x20000 720p, 0x40000 1080i, 0x80000 480p) from this same word.
+           * Off by default; RECOMP_AV_HDTV=E0000 (the ultrawide / SETRES launchers) turns them on. */
+          const char *e = getenv("RECOMP_AV_HDTV"); ULONG extra = (e && *e) ? (ULONG)strtoul(e, NULL, 16) : 0u;
+          *Result = AV_PACK_HDTV
                 | (AV_STANDARD_NTSC_M << AV_STANDARD_SHIFT)
-                | AV_REFRESH_60Hz;
+                | AV_REFRESH_60Hz | (extra & 0x000E0000u); }
         break;
 
     case AV_OPTION_QUERY_MODE:

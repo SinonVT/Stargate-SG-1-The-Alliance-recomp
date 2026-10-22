@@ -1,0 +1,10 @@
+--- a/recomp_0109.c
++++ b/recomp_0109.c
+@@ -8577,6 +8577,7 @@
+     if (CMP_NE(_fa, _fb)) goto loc_00458D91; /* jne: not equal / not zero */
+ 
+ loc_00458C18: ;
++    { extern int g_sg1_mode_w, g_sg1_mode_h; g_sg1_mode_w = (int)MEM32(ebp + 8); g_sg1_mode_h = (int)MEM32(ebp + 0xC); } /* SG1: remember the display mode the game picked */
+     eax = MEM32(ebp + 0x18);
+     MEM32(esi + 0xC) = eax;
+     eax = MEM32(ebp + 0x20);
