@@ -77,6 +77,23 @@ Keep `sg1_alliance_recomp.map` next to the exe: it is how a crash address in the
 ## Controls
 In a match the keyboard and mouse go to the game through its own bindings in `System\User.ini` (the PC prototype layout: WASD, Space jump, Ctrl/C duck, Shift walk, Z zoom, R reload, F use, number keys select weapons, mouse wheel cycles). The toolkit's keyboard-as-controller layer (Z/X/C/V = A/B/X/Y) is only active in the front-end menus, because the menus only listen to a pad; the recompiled build turns it off while a match is loaded (it follows the game's own log). Known issue: C may still jump in a match.
 
+**Function keys.** The game's own `System\User.ini` binds F1-F12, but several of them do nothing in this build and a few are also taken by the recompiled port. What was seen in game:
+
+| Key | Game binding | Result in this build |
+|---|---|---|
+| F1 | `ShowScores` | Opens and closes the scoreboard (multiplayer) |
+| F2, F3, F4 | `ShowServerInfo`, `ShowObjectives`, `SwitchTeam` | Nothing visible |
+| F5 | `ViewTeam` | Switches to third person / spectator style view. It does not switch back to first person. |
+| F6 | `Stat Net` | Shows the engine's "Net(Client)" statistics at the top left (ping, connections, channels, packet loss, packets, bytes, speed and more; all zero in single player) |
+| F7 | `CycleLoadout` | Nothing visible |
+| F8 | `writetolog` | Nothing visible (it only writes to the game log) |
+| F9 | `shot` | The port uses F9 to free or recapture the mouse (mouse and keyboard on/off toggle) |
+| F10 | `Gamma +` | Raises gamma. The port blocks Windows' menu-key handling of F10, so it no longer frees the mouse or pauses the game. |
+| F11 | `Brightness +` | Raises brightness. It no longer toggles fullscreen; use Alt+Enter for that. |
+| F12 | `Contrast +` | Raises contrast. It crashes if a debugger is attached (Windows reserves F12). |
+
+The Insert menu also has gamma and brightness settings.
+
 ## Optional tools
 - `sg1_alliance\tools\extract_scripts.py <game dir> <out dir>` writes the UnrealScript source that every `System\*.u` package carries (do not publish its output).
 - `sg1_alliance\tools\debug_menu.py <game dir> on|off` is an experiment to open the game's leftover PC debug menu (F6); it replaces the console and breaks the console-typing the FOV and profile-name features use, so leave it off.

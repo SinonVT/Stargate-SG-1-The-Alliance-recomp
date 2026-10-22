@@ -462,8 +462,8 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     /* First press only (bit 30: the key was already down), and with Alt held
      * (bit 29) for Enter; neither reaches the key table. */
-    if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30)))
-        || (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30)))) {
+    /* F11 no longer toggles fullscreen: the game binds it (Brightness +). */
+    if (m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30))) {
         fb_toggle_fullscreen(h);
         return 0;
     }
@@ -519,7 +519,11 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
                 fflush(stderr);
             }
         }
-        /* System keys still go to Windows, or Alt+F4 stops closing us. */
+        /* System keys still go to Windows, or Alt+F4 stops closing us.
+         * F10 is the exception: Windows treats it as a menu key and would
+         * freeze the game in its menu loop until you click, and the game
+         * binds it (Gamma +). */
+        if (w == 0x79) return 0;
         return m == WM_SYSKEYDOWN ? DefWindowProcA(h, m, w, l) : 0;
 
     case WM_KEYUP:
@@ -537,6 +541,7 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
                 xbox_InputKeySet(VK_RSHIFT, 0);
             }
         }
+        if (w == 0x79) return 0;   /* F10: keep Windows' menu mode out */
         return m == WM_SYSKEYUP ? DefWindowProcA(h, m, w, l) : 0;
 
     /* Mouse buttons go in the same table, for bindings that name them.
