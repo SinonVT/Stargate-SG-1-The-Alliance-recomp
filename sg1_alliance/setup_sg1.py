@@ -51,6 +51,10 @@ try:   # the dump lacks the Tutorial / M01A maps; New Game freezes without stand
     run('Creating stand-in tutorial maps in the game folder', [py, os.path.join(here, 'tools', 'make_standin_maps.py'), os.path.dirname(xbe)], cwd=here)
 except SystemExit:
     print('(stand-in maps not created; run tools\\make_standin_maps.py by hand)')
+try:   # key layout of this port (B = third person, Ctrl = duck, ...): the dump's own layout is the PC prototype one
+    run('Applying the keyboard layout (User.ini)', [py, os.path.join(here, 'tools', 'controls_preset.py'), os.path.dirname(xbe)], cwd=here)
+except SystemExit:
+    print('(keyboard layout not applied; run tools\\controls_preset.py by hand)')
 if '--build' in flags:
     if not shutil.which('cmake'):
         print('cmake not found: open a "x64 Native Tools Command Prompt for VS 2022" and run this script again, or build by hand (below).')
