@@ -1946,6 +1946,19 @@ static void bridge_KeQueryPerformanceFrequency(void)
 static void bridge_KeQuerySystemTime(void)
 {
     uint32_t time_ptr = STACK_ARG(0);
+    /* SG1 probe: a title that polls the clock millions of times is spinning.
+     * Name the caller (and the stack above it) every 2M calls, 12 times. */
+    {
+        static uint32_t n; static int printed;
+        if ((++n % 2000000u) == 0 && printed < 12) {
+            printed++;
+            fprintf(stderr, "[SG1] KeQuerySystemTime call #%u from=0x%08X esp=0x%08X stack: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                    n, g_xbox_kernel_caller, g_esp,
+                    BRIDGE_MEM32(g_esp), BRIDGE_MEM32(g_esp+4), BRIDGE_MEM32(g_esp+8), BRIDGE_MEM32(g_esp+12),
+                    BRIDGE_MEM32(g_esp+16), BRIDGE_MEM32(g_esp+20), BRIDGE_MEM32(g_esp+24), BRIDGE_MEM32(g_esp+28));
+            fflush(stderr);
+        }
+    }
     xbox_KeQuerySystemTime(XBOX_TO_NATIVE(time_ptr));
     g_eax = 0;
 }

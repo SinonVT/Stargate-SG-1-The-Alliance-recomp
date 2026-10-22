@@ -1,0 +1,10 @@
+--- a/recomp_0114.c
++++ b/recomp_0114.c
+@@ -6891,6 +6891,7 @@
+ 
+ loc_0049FB34: ;
+     eax = MEM32(esp + 4);
++    if (eax >= 0xFD000000u) { static int _n; if (_n++ < 5) { fprintf(stderr, "[SG1] AddRef on bad object %08X (pointer is in hardware space) -> ignored; ret=%08X stack: %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n", eax, MEM32(esp), MEM32(esp+4), MEM32(esp+8), MEM32(esp+12), MEM32(esp+16), MEM32(esp+20), MEM32(esp+24), MEM32(esp+28), MEM32(esp+32), MEM32(esp+36), MEM32(esp+40), MEM32(esp+44)); fflush(stderr); } eax = 0; esp += 8; return; }
+     MEM32(eax + 4) = MEM32(eax + 4) + 1;
+     _fa = (uint32_t)(MEM32(eax + 4)) & 0xFFFFFFFFu;
+     _fas = (int32_t)(int32_t)(_fa); _fb = (_fa == 0x80000000u); /* inc result/SF/OF; CF unchanged */

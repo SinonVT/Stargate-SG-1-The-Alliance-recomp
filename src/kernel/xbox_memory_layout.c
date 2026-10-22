@@ -3846,7 +3846,7 @@ static int g_heap_alloc_count = 0;
  * that churns. Flat array rather than an intrusive list: allocations come back
  * in bump order, so index order is address order and coalescing is a
  * neighbour check. */
-#define XBOX_HEAP_MAX_BLOCKS 65536
+#define XBOX_HEAP_MAX_BLOCKS 131072
 static struct { uint32_t addr; uint32_t size; uint8_t free; }
     g_heap_blocks[XBOX_HEAP_MAX_BLOCKS];
 static int g_heap_block_count = 0;
@@ -3854,6 +3854,29 @@ static int g_heap_block_count = 0;
 /* Guest threads allocate at once (audio, movie and streaming threads next to
  * the main one), and the table above is shared state. */
 static SRWLOCK g_heap_lock = SRWLOCK_INIT;
+
+/* SG1: drop the empty slots (size 0) that coalescing leaves behind. Nothing ever
+ * removed them, so on a long session they piled up until the table was full;
+ * from then on new allocations were not recorded at all, could never be freed or
+ * reused, and the heap ran out however big it was. Order is kept (index order is
+ * address order). Caller holds g_heap_lock. */
+static void heap_compact_blocks(void)
+{
+    static int logged;
+    int w = 0, before = g_heap_block_count;
+    for (int r = 0; r < g_heap_block_count; r++) {
+        if (g_heap_blocks[r].size == 0)
+            continue;
+        if (w != r)
+            g_heap_blocks[w] = g_heap_blocks[r];
+        w++;
+    }
+    g_heap_block_count = w;
+    if (logged++ < 6) {
+        fprintf(stderr, "  [HEAP] SG1 compacted block table: %d -> %d entries\n", before, w);
+        fflush(stderr);
+    }
+}
 
 /* RECOMP_HEAP_RECLAIM: give memory back properly.
  *
@@ -3865,9 +3888,29 @@ static SRWLOCK g_heap_lock = SRWLOCK_INIT;
  * heap is hit constantly and the answer does not change. */
 int xbox_HeapReclaimEnabled(void)
 {
+    /* SG-1 The Alliance: ON by default. Unreal Engine 2 allocates its memory
+     * pools with NtAllocateVirtualMemory and frees them again; with reclaim off
+     * those frees were dropped, the heap only ever grew, and a long session
+     * ended in "Ran out of virtual memory" with most of the heap dead.
+     * RECOMP_HEAP_RECLAIM=0 turns it back off. */
     static int on = -1;
-    if (on < 0)
-        on = getenv("RECOMP_HEAP_RECLAIM") != NULL;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_HEAP_RECLAIM");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
+/* Contiguous (GPU-visible) memory keeps the old behaviour: freed blocks are not
+ * reused unless RECOMP_HEAP_RECLAIM is set explicitly. Textures and vertex
+ * buffers live there, and a reused address can alias a cached texture. */
+static int contig_reclaim_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_HEAP_RECLAIM");
+        on = (e && e[0] != '0');
+    }
     return on;
 }
 
@@ -4313,7 +4356,7 @@ int xbox_ContiguousFree(uint32_t va)
         return 0;
     /* Ours, but kept: without RECOMP_HEAP_RECLAIM contiguous memory is never
      * reused, and 1 stops the caller handing it to the general heap. */
-    if (!xbox_HeapReclaimEnabled())
+    if (!contig_reclaim_enabled())
         return 1;
     first = (va - XBOX_CONTIG_BASE) / CONTIG_PAGE;
 
@@ -4487,6 +4530,10 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
 
     if (alignment < 4) alignment = 4;
 
+    /* Let the table fill up to almost full, then drop the empty slots. */
+    if (g_heap_block_count >= XBOX_HEAP_MAX_BLOCKS - 64)
+        heap_compact_blocks();
+
     /* Enforce minimum allocation size.
      * The Xbox D3D8 code sometimes computes resource sizes from GPU
      * capabilities that return 0 (since we don't have real NV2A hardware),
@@ -4553,6 +4600,24 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
                     fprintf(stderr, "  [HEAP] %d live blocks of %u bytes (%u KB)\n",
                             hist[j].n, hist[j].size,
                             (unsigned)((uint64_t)hist[j].n * hist[j].size / 1024));
+                }
+                {
+                    /* SG1: the histogram above hides sizes under 1 MB in total. Totals tell
+                     * live memory from free-but-unusable memory. */
+                    uint64_t live = 0, freeb = 0, big_free = 0; int nlive = 0, nfree = 0;
+                    for (int i = 0; i < g_heap_block_count; i++) {
+                        if (!g_heap_blocks[i].size) continue;
+                        if (g_heap_blocks[i].free) { nfree++; freeb += g_heap_blocks[i].size;
+                            if (g_heap_blocks[i].size > big_free) big_free = g_heap_blocks[i].size; }
+                        else { nlive++; live += g_heap_blocks[i].size; }
+                    }
+                    fprintf(stderr, "  [HEAP] SG1 totals: reclaim=%d table=%d/%d live=%d blocks %llu KB, free=%d blocks %llu KB (largest free %llu KB), request=%u align=%u\n",
+                            xbox_HeapReclaimEnabled(), g_heap_block_count, XBOX_HEAP_MAX_BLOCKS,
+                            nlive, (unsigned long long)(live / 1024), nfree, (unsigned long long)(freeb / 1024),
+                            (unsigned long long)(big_free / 1024), size, alignment);
+                    for (int j = 0; j < used; j++)
+                        if (hist[j].n > 500)
+                            fprintf(stderr, "  [HEAP] SG1 many: %d live blocks of %u bytes\n", hist[j].n, hist[j].size);
                 }
                 fflush(stderr);
             }

@@ -1,0 +1,41 @@
+--- a/recomp_0115.c
++++ b/recomp_0115.c
+@@ -7957,24 +7957,38 @@
+  * Frame: fpo_leaf
+  */
+ void sub_004A6E24(void)
+ {
++    static uint32_t _sg1_spin;
+     int _flags = 0; /* fallback flag var */
+     uint32_t _fa = 0, _fb = 0;
+     int32_t _fas = 0, _fbs = 0;
+     (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+ 
+ loc_004A6E24: ;
+     PUSH32(esp, esi);
+     esi = ecx;
++    _sg1_spin = 0;
+     _fa = (uint32_t)(MEM8(esi + 0x12)) & 0xFFu; _fb = (uint32_t)(1) & 0xFFu;
+     _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* test MEM8(esi + 0x12), 1 (8-bit) */
+     if (TEST_Z(_fa, _fb)) goto loc_004A6E3E; /* je: equal / zero */
+ 
+ loc_004A6E2D: ;
+     goto loc_004A6E36;
+ 
+ loc_004A6E2F: ;
++    /* SG1: DirectSound wait-for-voice loop. If the flag is never cleared (the APU never answers), give up
++     * after ~2M polls instead of freezing the game; log the object so the cause can be found. */
++    ++_sg1_spin;
++    if (_sg1_spin == 1000u || _sg1_spin == 1000000u) {
++        fprintf(stderr, "[SG1] DSound wait spin n=%u obj=%08X flags=%04X t78=%08X t7c=%08X\n", _sg1_spin, esi,
++                (unsigned)MEM16(esi + 0x12), MEM32(esi + 0x78), MEM32(esi + 0x7C)); fflush(stderr);
++    }
++    if (_sg1_spin >= 2000000u) {
++        fprintf(stderr, "[SG1] DSound wait spin: giving up, clearing flag 0x8000 on obj=%08X (flags=%04X)\n", esi, (unsigned)MEM16(esi + 0x12)); fflush(stderr);
++        MEM16(esi + 0x12) = (uint16_t)(MEM16(esi + 0x12) & 0x7FFFu);
++        goto loc_004A6E3E;
++    }
+     ecx = esi;
+     PUSH32(esp, 0x004A6E36u); RECOMP_ABI_CALL(0x004A660Cu, sub_004A660C); /* call 0x004A660C */
+ 
+ loc_004A6E36: ;

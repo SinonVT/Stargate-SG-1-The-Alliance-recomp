@@ -19,6 +19,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
 #include "apu_state.h"
 #include "apu.h"
 #include "fpconv.h"
@@ -1443,6 +1444,18 @@ static void voice_process(MCPXAPUState *d,
                                         NV_PAVS_VOICE_CFG_ENV0_EF_PITCHSCALE);
     float rate = 1.0f / powf(2.0f, (p + ps * 32 * ef_value) / 4096.0f);
     dbg->rate = rate;
+    {   /* SG1 probe: log a voice's pitch whenever the filter-envelope pitch scale is non-zero
+         * or the rate changes a lot. A voice that plays an octave off (deep/slow or high/fast)
+         * has one of these wrong. Rate-limited. */
+        static int16_t last_p[256]; static int8_t last_ps[256]; static int n;
+        if (v < 256 && (ps != last_ps[v] || (ps != 0 && p != last_p[v]) || (p - last_p[v] > 2048 || last_p[v] - p > 2048)) && n < 400) {
+            n++;
+            fprintf(stderr, "[APU-PITCH] voice %u p=%d pitchscale=%d ef=%.2f -> rate=%.3f\n",
+                    (unsigned)v, (int)p, (int)ps, ef_value, rate);
+            fflush(stderr);
+        }
+        if (v < 256) { last_p[v] = p; last_ps[v] = ps; }
+    }
 
     /* Step amplitude envelope */
     float ea_value = voice_step_envelope(
