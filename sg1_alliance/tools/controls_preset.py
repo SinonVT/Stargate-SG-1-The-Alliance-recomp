@@ -5,7 +5,7 @@ The dump's default layout is the PC prototype layout (Ctrl=Jump, Alt=Fire, Z=Str
     B = ToggleBehindView (third person)     Ctrl = Duck        CapsLock = toggleInvisibility
     Z = ZoomToggle                          Alt, Backspace, Q = unbound (Alt releases the mouse pointer)
     W/A/S/D walking strength: the Xbox bindings (Speed=+-1200, scaled by frame time) give a tiny acceleration for keys, so
-    walking felt stuck; forward/strafe-right use SpeedBase=+20000 (like the stick), back/strafe-left Speed=-30000.
+    walking felt stuck; all four directions use Speed=+-30000 (equal strength, so diagonals like W+A work).
 
     python sg1_alliance\\tools\\controls_preset.py "C:\\path\\to\\game folder"            apply
     python sg1_alliance\\tools\\controls_preset.py "C:\\path\\to\\game folder" --revert   restore the backups (*.orig_sg1)
@@ -16,8 +16,8 @@ a = [x for x in sys.argv[1:]]
 if not a or a[0].startswith('--'): print(__doc__); sys.exit(1)
 sysdir = os.path.join(a[0].strip('"'), 'System'); revert = '--revert' in a
 KEYS = [('Ctrl', 'Duck'), ('Alt', ''), ('CapsLock', 'toggleInvisibility'), ('Z', 'ZoomToggle'), ('Backspace', ''), ('B', 'ToggleBehindView'), ('Q', '')]
-ALIASES = {'MoveForward': 'Axis aBaseY SpeedBase=+20000.0', 'MoveBackward': 'Axis aBaseY Speed=-30000.0',
-           'StrafeLeft': 'Axis aStrafe Speed=-30000.0', 'StrafeRight': 'Axis aStrafe SpeedBase=+20000.0'}
+ALIASES = {'MoveForward': 'Axis aBaseY Speed=+30000.0', 'MoveBackward': 'Axis aBaseY Speed=-30000.0',
+           'StrafeLeft': 'Axis aStrafe Speed=-30000.0', 'StrafeRight': 'Axis aStrafe Speed=+30000.0'}
 import re
 done = 0
 for name in ('User.ini', 'DefUser.ini'):
