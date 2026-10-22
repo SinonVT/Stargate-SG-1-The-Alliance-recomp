@@ -1,6 +1,6 @@
 # Stargate SG-1: The Alliance - Xbox static recompilation
 
-A work-in-progress native Windows port of the unreleased Xbox game *Stargate SG-1: The Alliance* (Unreal Engine 2, XDK 5849), built with [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp) v0.15.0. The game's x86 code is translated to C and compiled with MSVC; the NV2A GPU is translated to Direct3D 11.
+A work-in-progress native Windows port of the unreleased Xbox game *Stargate SG-1: The Alliance* (Unreal Engine 2, XDK 5849), built with [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp) v0.16.0. The game's x86 code is translated to C and compiled with MSVC; the NV2A GPU is translated to Direct3D 11.
 
 **No game files, no generated game code and no executables are in this repository.** You need your own copy of the game, and you generate the recompiled code yourself from your own `default.xbe`.
 
