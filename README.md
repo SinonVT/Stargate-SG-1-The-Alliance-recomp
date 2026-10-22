@@ -92,7 +92,7 @@ In a match the keyboard and mouse go to the game through its own bindings in `Sy
 | F11 | `Brightness +` | Raises brightness. It no longer toggles fullscreen; use Alt+Enter for that. |
 | F12 | `Contrast +` | Raises contrast. It crashes if a debugger is attached (Windows reserves F12). |
 
-The Insert menu also has gamma and brightness settings.
+The Insert menu only has an on/off switch for applying the game's gamma ramp ("Game gamma/bright."). The actual gamma, brightness and contrast levels are changed with F10, F11 and F12.
 
 ## Optional tools
 - `sg1_alliance\tools\extract_scripts.py <game dir> <out dir>` writes the UnrealScript source that every `System\*.u` package carries (do not publish its output).
