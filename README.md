@@ -65,6 +65,9 @@ Useful environment variables (some are set by default in `main.c`): `RECOMP_PB_E
 ## In-game settings (Insert)
 Mouse sensitivity, Invert Y, Controllers on/off, Field of view (60-120, typed into the game console for you, so use it in a map; the game saves it in `System\User.ini`), Resolution (480p to 2160p), Anisotropic filter, Mipmaps, HD texture pack, Custom textures, Heat haze, Player shadows, Game gamma/brightness (applies the game's own gamma ramp), Dark area lift (off / low / medium / high / max) and a Debug page (texture dump, draw logs, hide draws, floor texgen fix, cube map lighting). Esc on the Debug page goes back. Defaults on a fresh install: mouse sensitivity 50, controllers off, HD texture pack on, 720p, anisotropic off, mipmaps on, custom textures off, heat haze on, player shadows on, game gamma on, dark area lift low, floor texgen fix and cube map lighting on, debug items off. Settings are saved to `sg1_settings.txt` next to the exe. PgUp/PgDn change mouse sensitivity live; Home/End change the resolution.
 
+## Reporting a crash
+Keep `sg1_alliance_recomp.map` next to the exe: it is how a crash address in the log is turned into a function name. After a crash, open an issue and attach `sg1_trace.txt` and `xbox_kernel.log` (both next to the exe) plus the `.map` file from the same build, and say which map you were on and what you were doing.
+
 ## Controls
 In a match the keyboard and mouse go to the game through its own bindings in `System\User.ini` (the PC prototype layout: WASD, Space jump, Ctrl/C duck, Shift walk, Z zoom, R reload, F use, number keys select weapons, mouse wheel cycles). The toolkit's keyboard-as-controller layer (Z/X/C/V = A/B/X/Y) is only active in the front-end menus, because the menus only listen to a pad; the recompiled build turns it off while a match is loaded (it follows the game's own log). Known issue: C may still jump in a match.
 
