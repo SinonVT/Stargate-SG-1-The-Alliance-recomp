@@ -130,3 +130,6 @@ Input
 
 ## Credits
 Built on [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp) (see `LICENSE`).
+
+---
+<sub>*AI was used to assist with my project, but I put a lot of effort into guiding and using it for advice with crashes and other issues to help complete this project. Thank you.*</sub>
