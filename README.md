@@ -98,6 +98,7 @@ The Insert menu only has an on/off switch for applying the game's gamma ramp ("G
 - `sg1_alliance\tools\extract_scripts.py <game dir> <out dir>` writes the UnrealScript source that every `System\*.u` package carries (do not publish its output).
 - `sg1_alliance\tools\debug_menu.py <game dir> on|off` is an experiment to open the game's leftover PC debug menu (F6); it replaces the console and breaks the console-typing the FOV and profile-name features use, so leave it off.
 - `sg1patch.py` also has a game-mode patch that enables Last Man Standing in `System\tweak\MP\GameModes.ini`.
+- `sg1_alliance\tools\patch_gate_close.py "<game dir>\System\StargateContent.u"` fixes a bug in the game's own scripts: a plain stargate (the main menu gate and cutscene gates) ignored its second trigger and stayed open forever, because an open gate only closed for triggers from a linked gate. The patch makes plain gates close on that trigger and leaves linked gates (multiplayer/CTF) exactly as before. It writes a backup `StargateContent.u.orig`; copy it back to undo. `setup_sg1.py` runs it for you.
 
 ## What we changed in xboxrecomp
 Performance
