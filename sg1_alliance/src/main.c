@@ -344,14 +344,90 @@ static void sg_log(const char *fmt, ...)
     fflush(sg_trace_fp);
     LeaveCriticalSection(&sg_trace_cs);
 }
+
+#include <tlhelp32.h>
+/* SG1 freeze diagnosis: suspend every other thread for a moment, read where it is (an offset into the exe, which
+ * build\Release\sg1_alliance_recomp.map names) plus the return addresses found on its stack, then log it. The text is
+ * built into a local buffer while the threads are stopped, with no CRT locks or heap, and written after they resume. */
+static void sg_dump_threads(const char *why)
+{
+    static char out[8192];
+    int n = 0;
+    unsigned char *base = (unsigned char *)GetModuleHandleA(NULL);
+    unsigned long long lo = (unsigned long long)base, hi = lo;
+    HANDLE snap;
+    THREADENTRY32 te;
+    DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    if (base) {
+        IMAGE_DOS_HEADER *dh = (IMAGE_DOS_HEADER *)base;
+        IMAGE_NT_HEADERS *nh = (IMAGE_NT_HEADERS *)(base + dh->e_lfanew);
+        hi = lo + nh->OptionalHeader.SizeOfImage;
+    }
+    out[0] = 0;
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            HANDLE h;
+            CONTEXT c;
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+            h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+            if (!h) continue;
+            memset(&c, 0, sizeof(c));
+            c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+            if (SuspendThread(h) != (DWORD)-1) {
+                if (GetThreadContext(h, &c)) {
+                    int found = 0;
+                    unsigned long long *sp = (unsigned long long *)c.Rsp;
+                    int i;
+                    if (c.Rip >= lo && c.Rip < hi) n += _snprintf(out + n, sizeof(out) - n - 1, "\n  tid %lu RIP=+%llX bt:", (unsigned long)te.th32ThreadID, c.Rip - lo);
+                    else n += _snprintf(out + n, sizeof(out) - n - 1, "\n  tid %lu RIP=ext(%llX) bt:", (unsigned long)te.th32ThreadID, c.Rip);
+                    __try {
+                        for (i = 0; i < 400 && found < 14 && n < (int)sizeof(out) - 64; i++)
+                            if (sp[i] >= lo && sp[i] < hi) { n += _snprintf(out + n, sizeof(out) - n - 1, " +%llX", sp[i] - lo); found++; }
+                    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+                }
+                ResumeThread(h);
+            }
+            CloseHandle(h);
+        } while (n < (int)sizeof(out) - 128 && Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    out[sizeof(out) - 1] = 0;
+    sg_log("THREADS (%s):%s", why, out);
+}
+
 static DWORD WINAPI sg_heartbeat(LPVOID unused)
 {
     DWORD flags = 0;
+    unsigned long long prev = 0; int slow = 0, spin = 0;
+    extern volatile uint32_t g_icall_trace[16];
+    extern volatile uint32_t g_icall_trace_idx;
     (void)unused;
     for (;;) {
         HANDLE e = GetStdHandle(STD_ERROR_HANDLE);
         BOOL ok = e && e != INVALID_HANDLE_VALUE && GetHandleInformation(e, &flags);
         sg_log("HB icalls=%llu stderr_handle=%p valid=%d", (unsigned long long)g_icall_count, (void *)e, (int)ok);
+        /* SG1 stall watchdog: the guest normally makes millions of indirect calls a second. A few hundred a second for
+         * three seconds is a freeze; name the last indirect-call targets so the loop can be found. */
+        {
+            unsigned long long now = (unsigned long long)g_icall_count;
+            if (now - prev < 3000ull) slow++; else slow = 0;
+            prev = now;
+            { /* SG1: a spin shows as the same few targets over and over */
+              int d = 0, a, b; for (a = 0; a < 16; a++) { for (b = 0; b < a; b++) if (g_icall_trace[a] == g_icall_trace[b]) break; if (b == a) d++; }
+              if (d <= 4) spin++; else spin = 0;
+              if (spin == 20 || (spin > 20 && (spin % 100) == 0)) { char sb[256]; int k2, n2 = 0; for (k2 = 0; k2 < 16; k2++) n2 += _snprintf(sb + n2, sizeof(sb) - n2, " %08X", g_icall_trace[(g_icall_trace_idx + k2) & 15]); sb[sizeof(sb) - 1] = 0; sg_log("SPIN guest repeating %d beats; ICALL targets:%s", spin, sb); if (spin == 20 || (spin % 300) == 0) sg_dump_threads("spin"); }
+            }
+            if (slow == 30 || (slow > 30 && (slow % 100) == 0)) {
+                char b[256]; int k, n = 0;
+                for (k = 0; k < 16; k++) n += _snprintf(b + n, sizeof(b) - n, " %08X", g_icall_trace[(g_icall_trace_idx + k) & 15]);
+                b[sizeof(b) - 1] = 0;
+                sg_log("STALL guest slow for %d beats; recent ICALL targets:%s", slow, b);
+                if (slow == 30 || (slow % 300) == 0) sg_dump_threads("stall");
+            }
+        }
         Sleep(100);
     }
     return 0;
@@ -779,6 +855,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * silently inert, and the one diagnostic that tells a hang from slowness
      * does nothing while appearing to be set. */
     if (!getenv("RECOMP_TITLE_KEVENTS")) _putenv("RECOMP_TITLE_KEVENTS=1");   /* D3D waits on an event it initialised itself */
+    if (!getenv("RECOMP_DISPATCH_GATE")) _putenv("RECOMP_DISPATCH_GATE=1");   /* the one-CPU gate DirectSound's IRQL locks rely on; set it to 0 to turn it off */
     if (!getenv("RECOMP_USB")) _putenv("RECOMP_USB=1");
     if (!getenv("RECOMP_KEYBOARD")) _putenv("RECOMP_KEYBOARD=1");
     if (!getenv("RECOMP_MKB")) _putenv("RECOMP_MKB=1");

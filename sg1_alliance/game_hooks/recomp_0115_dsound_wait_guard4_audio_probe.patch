@@ -1,0 +1,14 @@
+--- a/recomp_0115.c
++++ b/recomp_0115.c
+@@ -7996,6 +7996,11 @@
+         /* The game itself runs sub_004A6523 (the voice timeout path) once its 500 ms are up; do that now instead of
+          * only clearing the flag, which left the voice half alive and later corrupted the audio object list. */
+         fprintf(stderr, "[SG1] DSound wait spin: running the voice timeout path on obj=%08X (flags=%04X)\n", esi, (unsigned)MEM16(esi + 0x12)); fflush(stderr);
++        { extern volatile uint32_t g_sg1_isr_n, g_sg1_dpc_n, g_sg1_ists_or; static int _sg1_dump;   /* SG1 audio probe */
++          fprintf(stderr, "[SG1-AUD] isr=%u dpc=%u ists_or=%08X\n", g_sg1_isr_n, g_sg1_dpc_n, g_sg1_ists_or);
++          if (_sg1_dump++ < 8) { int _i; fprintf(stderr, "[SG1-AUD] obj %08X:", esi); for (_i = 0; _i < 36; _i++) fprintf(stderr, " %08X", MEM32(esi + _i * 4));
++            fprintf(stderr, "\n[SG1-AUD] obj->+8 %08X:", MEM32(esi + 8)); if (MEM32(esi + 8) > 0x10000u && MEM32(esi + 8) < 0x7F000000u) for (_i = 0; _i < 16; _i++) fprintf(stderr, " %08X", MEM32(MEM32(esi + 8) + _i * 4));
++            fprintf(stderr, "\n"); fflush(stderr); } }
+         ecx = esi;
+         PUSH32(esp, 0x004A6E3Eu); RECOMP_ABI_CALL(0x004A6523u, sub_004A6523);
+         if (MEM8(esi + 0x12) & 1u) MEM16(esi + 0x12) = (uint16_t)(MEM16(esi + 0x12) & 0x7FFEu);

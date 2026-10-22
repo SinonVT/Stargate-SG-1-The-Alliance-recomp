@@ -1,0 +1,26 @@
+--- a/recomp_0114.c
++++ b/recomp_0114.c
+@@ -7,6 +7,7 @@
+ #include "recomp_funcs.h"
+ #include <math.h>
+ #include <stdio.h>
++volatile uint32_t g_sg1_isr_n, g_sg1_dpc_n, g_sg1_ists_or;   /* SG1 audio probe */
+ 
+ /**
+  * sub_0049D512
+@@ -23286,6 +23287,7 @@
+ {
+ 
+ loc_004A44FC: ;
++    g_sg1_dpc_n++;   /* SG1 audio probe */
+     ecx = MEM32(esp + 8);
+     PUSH32(esp, 0x004A4505u); RECOMP_ABI_CALL(0x004A4460u, sub_004A4460); /* call 0x004A4460 */
+ 
+@@ -23589,6 +23591,7 @@
+ loc_004A4640: ;
+     PUSH32(esp, ebx);
+     ebx = MEM32(-25161728);
++    g_sg1_isr_n++; g_sg1_ists_or |= ebx;   /* SG1 audio probe */
+     PUSH32(esp, esi);
+     PUSH32(esp, edi);
+     edi = ebx;
