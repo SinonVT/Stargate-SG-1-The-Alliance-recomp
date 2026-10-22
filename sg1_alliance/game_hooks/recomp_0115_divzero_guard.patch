@@ -1,0 +1,17 @@
+--- a/recomp_0115.c
++++ b/recomp_0115.c
+@@ -5460,9 +5460,14 @@
+     eax = MEM32(ebx + 0x24);
+     edx = 0; /* xor self */
+     _fa = (uint32_t)(edx) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* xor result */
++    if (edi == 0u) {   /* SG1: byte at [ecx+0x64] is 0 (stale/unfilled voice format); the CPU would fault with divide-by-zero. The code right after treats edi==0 as 'nothing to do'. */
++      static int _sg1_dz; if (_sg1_dz++ < 20) { fprintf(stderr, "[SG1] DSound sub_004A5FFD: divisor 0, divide skipped (ecx=%08X)\n", ecx); fflush(stderr); }
++      eax = 0; edx = 0;
++    } else {
+     { uint64_t _dividend = ((uint64_t)edx << 32) | eax;
+       eax = (uint32_t)(_dividend / (uint32_t)edi);
+       edx = (uint32_t)(_dividend % (uint32_t)edi); }
++    }
+     esi = 0; /* xor self */
+     _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* xor result */
+     _fa = (uint32_t)(edi) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
