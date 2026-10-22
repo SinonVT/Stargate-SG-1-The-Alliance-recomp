@@ -38,6 +38,7 @@ typedef struct {
     uint32_t pitch;             /* bytes per row */
     uint32_t bytes_per_pixel;   /* 2 or 4 */
     uint32_t aa_sx, aa_sy;      /* 1 or 2 each */
+    uint32_t clip_x, clip_y;    /* clip rectangle origin, real pixels (SG1: for letterboxed cutscenes) */
 } Nv2aSurface;
 
 /* A texture as the title programmed it. uv in Nv2aVertex are in texels. */

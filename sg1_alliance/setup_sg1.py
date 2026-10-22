@@ -47,6 +47,10 @@ else:
     run('5/5 Recompile to C (several minutes)', [py, '-m', 'tools.recomp', xbe, '--all', '--split', '250', '--gen-dir', gen])
 
 run('Applying our hooks to the generated code', [py, os.path.join(here, 'game_hooks', 'apply_hooks.py')], cwd=here)
+try:   # the dump lacks the Tutorial / M01A maps; New Game freezes without stand-ins
+    run('Creating stand-in tutorial maps in the game folder', [py, os.path.join(here, 'tools', 'make_standin_maps.py'), os.path.dirname(xbe)], cwd=here)
+except SystemExit:
+    print('(stand-in maps not created; run tools\\make_standin_maps.py by hand)')
 if '--build' in flags:
     if not shutil.which('cmake'):
         print('cmake not found: open a "x64 Native Tools Command Prompt for VS 2022" and run this script again, or build by hand (below).')

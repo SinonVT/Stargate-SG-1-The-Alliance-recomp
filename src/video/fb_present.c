@@ -177,6 +177,11 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
         return;
     if (getenv("RECOMP_FB_VA"))
         return;                       /* pinned: leave the old path alone */
+    {   /* SG1 diag: log each flip surface the first time it is seen */
+        static uint32_t seen[32]; static int ns; int k, found = 0;
+        for (k = 0; k < ns; k++) if (seen[k] == fb_va) { found = 1; break; }
+        if (!found && ns < 32) { seen[ns++] = fb_va; fprintf(stderr, "[PRESENT] new flip surface va %08X pitch %u\n", fb_va, pitch); }
+    }
     next = (s_present_idx == 0) ? 1 : 0;
     if (!s_present[next]) {
         s_present[next] = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height,

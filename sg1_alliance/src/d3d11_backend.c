@@ -20,6 +20,7 @@
 #define COBJMACROS
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -535,12 +536,59 @@ static void rt_free(Rt *r)
     memset(r, 0, sizeof *r);
 }
 
+static int sg1_letterbox_on(void)   /* RECOMP_LETTERBOX_OFF=1 restores the old behaviour */
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RECOMP_LETTERBOX_OFF"); v = !(e && e[0] == '1'); }
+    return v;
+}
+
 static Rt *rt_get(const Nv2aSurface *s)
 {
     Rt *r = rt_find(s->color_va);
     int i, victim = 0;
     D3D11_TEXTURE2D_DESC td;
 
+    /* SG1: cutscenes alternate a letterboxed 640x289 surface and a 640x480 one at the SAME address (it is the same
+     * buffer). Throwing the target away on every change lost the picture and froze the window on the old menu frame.
+     * A shorter full-width surface now draws into the top of the existing target (viewport), and a taller one grows
+     * the target and keeps what was drawn. Only full-width screen-sized targets; shadow/effect targets are untouched. */
+    if (r && s->width == 640 && r->w == 640 && r->pw == pw_of(s->width) && s->height >= 200 && r->h >= 200 && s->height != r->h
+            && sg1_letterbox_on()) {
+        if (s->height < r->h) { r->last_use = g_frame; return r; }
+        {
+            D3D11_TEXTURE2D_DESC gd;
+            ID3D11Texture2D *nt = NULL;
+            ID3D11RenderTargetView *nrtv = NULL;
+            ID3D11ShaderResourceView *nsrv = NULL;
+            int a, b;
+            memset(&gd, 0, sizeof gd);
+            gd.Width = pw_of(s->width); gd.Height = pw_of(s->height);
+            gd.MipLevels = gd.ArraySize = 1;
+            gd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            gd.SampleDesc.Count = 1;
+            gd.Usage = D3D11_USAGE_DEFAULT;
+            gd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &gd, NULL, &nt))) {
+                D3D11_BOX box;
+                ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)nt, NULL, &nrtv);
+                ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)nt, NULL, &nsrv);
+                box.left = 0; box.top = 0; box.front = 0; box.right = r->pw; box.bottom = r->ph; box.back = 1;
+                ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)nt, 0, 0, 0, 0, (ID3D11Resource *)r->tex, 0, &box);
+                if (r->srv) ID3D11ShaderResourceView_Release(r->srv);
+                if (r->rtv) ID3D11RenderTargetView_Release(r->rtv);
+                if (r->staging) ID3D11Texture2D_Release(r->staging);
+                for (a = 0; a < 2; a++) for (b = 0; b < 2; b++) if (r->stg[a][b]) ID3D11Texture2D_Release(r->stg[a][b]);
+                ID3D11Texture2D_Release(r->tex);
+                r->tex = nt; r->rtv = nrtv; r->srv = nsrv; r->staging = NULL;
+                memset(r->stg, 0, sizeof r->stg); memset(r->stg_idx, 0, sizeof r->stg_idx); memset(r->stg_have, 0, sizeof r->stg_have);
+                r->h = s->height; r->ph = pw_of(s->height);
+                r->last_use = g_frame;
+                { static int gn; if (gn++ < 20) fprintf(stderr, "[RT-GROW] va %08X now %ux%u (content kept)\n", r->va, r->w, r->h); }
+                return r;
+            }
+        }
+    }
     if (r && (r->w != s->width || r->h != s->height || r->pw != pw_of(s->width) || r->ph != pw_of(s->height)))
         { rt_free(r); r = NULL; }
     if (r) { r->last_use = g_frame; return r; }
@@ -550,6 +598,7 @@ static Rt *rt_get(const Nv2aSurface *s)
     }
     r = &g_rt[victim];
     if (r->tex) rt_free(r);
+    { static int rn; if (rn++ < 300) fprintf(stderr, "[RT-NEW] frame %u va %08X %ux%u\n", (unsigned)g_frame, s->color_va, s->width, s->height); }
     memset(&td, 0, sizeof td);
     td.Width = pw_of(s->width); td.Height = pw_of(s->height);
     td.MipLevels = td.ArraySize = 1;
@@ -1310,11 +1359,27 @@ static void be_clear(const Nv2aSurface *s, const Nv2aRenderState *rs,
     if (flags & 0xF0u) {
         float c[4];
         argb_to_float(argb, c);
-        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, r->rtv, c);
+        {   /* SG1: a letterboxed cutscene clears only its clip rectangle (e.g. 640x289); the bars below keep their black.
+             * Clearing the whole target painted the bars with the scene's fog colour (a green block). */
+            int part = 0;
+            if (sg1_letterbox_on() && s->width == 640 && r->w == 640 && s->height < r->h && s->height >= 200) {
+                ID3D11DeviceContext1 *c1 = NULL;
+                if (SUCCEEDED(ID3D11DeviceContext_QueryInterface(g_ctx, &IID_ID3D11DeviceContext1, (void **)&c1)) && c1) {
+                    D3D11_RECT rc;
+                    rc.left = (LONG)pw_of(s->clip_x); rc.top = (LONG)pw_of(s->clip_y);
+                    rc.right = rc.left + (LONG)pw_of(s->width); rc.bottom = rc.top + (LONG)pw_of(s->height);
+                    ID3D11DeviceContext1_ClearView(c1, (ID3D11View *)r->rtv, c, &rc, 1);
+                    ID3D11DeviceContext1_Release(c1);
+                    part = 1;
+                    { static int cn; if (cn++ < 10) fprintf(stderr, "[CLEAR-PART] clip %ux%u at (%u,%u) of RT %ux%u\n", s->width, s->height, s->clip_x, s->clip_y, r->w, r->h); }
+                }
+            }
+            if (!part) ID3D11DeviceContext_ClearRenderTargetView(g_ctx, r->rtv, c);
+        }
         r->last_draw = g_frame;
     }
     if ((flags & 0x3u) && rs->zeta_va) {
-        Depth *d = depth_get(rs->zeta_va, pw_of(s->width), pw_of(s->height));
+        Depth *d = depth_get(rs->zeta_va, r->pw, r->ph);
         if (d) {
             UINT cf = 0;
             if (flags & 1u) cf |= D3D11_CLEAR_DEPTH;
@@ -1421,7 +1486,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
     }
     r = rt_get(s);
     if (!r) return;
-    d = depth_get(rs->zeta_va, pw_of(s->width), pw_of(s->height));
+    d = depth_get(rs->zeta_va, r->pw, r->ph);
 
     bytes = b->count * (uint32_t)sizeof(Nv2aXfVertex);
     t_a = qpc();
@@ -1447,6 +1512,17 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
         if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mt, 0, &m)))
             return;
         memcpy((uint8_t *)m.pData + g_vb_pos, b->vertices, bytes);
+        if (sg1_letterbox_on() && r->h > s->height && s->width == 640 && s->height >= 200 && (s->clip_x || s->clip_y)) {
+            /* SG1: vertex positions are absolute in the surface; the letterbox clip starts at (clip_x, clip_y) and the
+             * viewport below starts there too, so make the positions relative to it (the picture sits at row 95, not 0). */
+            Nv2aXfVertex *dv = (Nv2aXfVertex *)((uint8_t *)m.pData + g_vb_pos);
+            uint32_t vi;
+            for (vi = 0; vi < b->count; vi++) {
+                dv[vi].pos[0] = b->vertices[vi].pos[0] - (float)s->clip_x;
+                dv[vi].pos[1] = b->vertices[vi].pos[1] - (float)s->clip_y;
+            }
+            { static int lbn; if (lbn++ < 3) fprintf(stderr, "[LB-SHIFT] draws in clip %ux%u at (%u,%u) are shifted to the clip origin\n", s->width, s->height, s->clip_x, s->clip_y); }
+        }
         {   /* SG1: a lit prop whose vertex colours were never computed is pure white (the engine only fills them
              * when a light near it changes, e.g. you shoot next to it): draw it with a moderate level instead of full bright */
             static int wf = -1;
@@ -1576,6 +1652,7 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
     rtv = r->rtv;
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, d ? d->dsv : NULL);
     vp.TopLeftX = 0; vp.TopLeftY = 0;
+    if (sg1_letterbox_on() && r->h > s->height && s->width == 640 && s->height >= 200) { vp.TopLeftX = (float)pw_of(s->clip_x); vp.TopLeftY = (float)pw_of(s->clip_y); }   /* letterbox: draw inside the clip rectangle */
     vp.Width = (float)pw_of(s->width); vp.Height = (float)pw_of(s->height);
     vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
@@ -1920,7 +1997,11 @@ static void be_resolve(uint32_t color_va, uint32_t pitch, uint32_t bpp)
     uint32_t y, x;
     if (!g_dev || g_init_failed) return;
     r = rt_find(color_va);
-    if (!r) return;
+    if (!r) {   /* SG1 diag: a resolve into memory that is not a known render target (a cutscene / other surface?) */
+        static int miss_n; if (miss_n < 40 || (miss_n % 200) == 0) fprintf(stderr, "[RESOLVE-MISS] frame %u va %08X pitch %u bpp %u (n=%d)\n", (unsigned)g_frame, color_va, pitch, bpp, miss_n);
+        miss_n++;
+        return;
+    }
     mt = rt_map_async(r, 0, &m);
     if (!mt)
         return;
@@ -1974,6 +2055,7 @@ int sg1_hires_grab(uint32_t va, const uint32_t **pix, uint32_t *w, uint32_t *h)
     uint32_t y;
     if (!g_dev || g_init_failed || sg1_res_scale() < 1.01f) return 0;
     r = rt_find(va);
+    if (!r) { static int hm; if (hm < 40 || (hm % 100) == 0) fprintf(stderr, "[HIRES-MISS] frame %u flip va %08X not a render target (n=%d)\n", (unsigned)g_frame, va, hm); hm++; }
     if (!r || r->pw == r->w) return 0;
     if (cap < (size_t)r->pw * r->ph) {
         free(buf); cap = (size_t)r->pw * r->ph;

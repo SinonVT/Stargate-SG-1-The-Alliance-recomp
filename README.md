@@ -31,6 +31,8 @@ sg1_alliance\setup_sg1.bat "C:\path\to\your game folder" --build
 
 It generates the recompiled code from your `default.xbe`, applies our fixes to it, then builds. If something fails it stops and says which step; fix that and run the same line again (finished steps are skipped).
 3. Start the game: run `sg1_alliance\build\Release\sg1_alliance_recomp.exe` (double-click is fine). The exe finds `default.xbe` in its own folder or a parent folder; if your game is elsewhere set `RECOMP_GAME_DIR` to its folder first.
+New Game: the game asks for a map called `Tutorial ` (Yes) or `M01A` (No) that the dump does not contain, and it freezes if they are absent. `M00.unr` is the tutorial level, so `setup_sg1.py` creates copies of it in your game folder as `Maps\Tutorial .unr` (the real tutorial) and `Maps\M01A.unr` (a copy of `M02A.unr`: the real first mission is missing, so No starts mission 2 instead). If you did not use the script run `python sg1_alliance\tools\make_standin_maps.py "C:\path\to\game folder"`. Existing files are never overwritten.
+
 Playing it from your game folder: copy everything in `sg1_alliance\build\Release` (`sg1_alliance_recomp.exe`, the `texpack` folder and the `.map` file; `sg1_settings.txt` appears on first run) into the game folder, right next to `default.xbe`, and start it from there. Copy the whole set, not just the exe, or the HD textures and settings will be missing.
 4. Optional: the HD texture pack (below) and `sg1_alliance\tools\patches\sg1patch.py` (fixes a bug in the game's own script files). The Insert key opens the in-game settings.
 
