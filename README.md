@@ -31,6 +31,7 @@ sg1_alliance\setup_sg1.bat "C:\path\to\your game folder" --build
 
 It generates the recompiled code from your `default.xbe`, applies our fixes to it, then builds. If something fails it stops and says which step; fix that and run the same line again (finished steps are skipped).
 3. Start the game: `sg1_alliance\build\Release\dbglaunch.exe sg1_alliance_recomp.exe`. The exe finds `default.xbe` in its own folder or a parent folder; if your game is elsewhere set `RECOMP_GAME_DIR` to its folder first.
+Playing it from your game folder: copy everything in `sg1_alliance\build\Release` (`sg1_alliance_recomp.exe`, `dbglaunch.exe`, the `texpack` folder and the `.map` file; `sg1_settings.txt` appears on first run) into the game folder, right next to `default.xbe`, and start it from there. Copy the whole set, not just the exe, or the HD textures and settings will be missing.
 4. Optional: the HD texture pack (below) and `sg1_alliance\tools\patches\sg1patch.py` (fixes a bug in the game's own script files). The Insert key opens the in-game settings.
 
 Do not try to run the pieces by hand unless you have to: the generated code must be patched with `game_hooks\apply_hooks.py` (setup does this) or the keyboard, menu mouse, gamma and network pieces will be missing. `python sg1_alliance\game_hooks\apply_hooks.py --check` shows whether they are applied.
