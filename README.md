@@ -13,7 +13,7 @@ Boots Unreal Engine 2, shows the animated main menu, has audio, keyboard, mouse 
 
 ## Layout
 - Repository root (`src/`, `include/`, `docs/` ...) - the xboxrecomp toolkit with our changes (kernel/NV2A executor, input, video). The original toolkit README is kept as `README-xboxrecomp.md`.
-- `sg1_alliance/` - the game project: `src/main.c`, `src/d3d11_backend.c` (D3D11 back end), `src/recomp_manual.c`, `src/xnet_shim.c`, `CMakeLists.txt`, `tools/dbglaunch.c`.
+- `sg1_alliance/` - the game project: `src/main.c`, `src/d3d11_backend.c` (D3D11 back end), `src/recomp_manual.c`, `src/xnet_shim.c`, `CMakeLists.txt`, and the optional `tools/dbglaunch.c` (a debugging launcher that logs exceptions; compile it yourself with `cl tools\dbglaunch.c` if you want it; it is not needed to play).
 - `sg1_alliance/setup_sg1.py` / `setup_sg1.bat` - one-step setup (generate, patch, build).
 - `sg1_alliance/game_hooks/` - patches to the *generated* code (keyboard and mouse look in `recomp_0047.c`, menu mouse in `recomp_0043.c`, gamma ramp in `recomp_0108.c`, XNet shim hooks in `recomp_0103.c`, two crash workarounds in `recomp_0008.c`, a missing FPU entry in `recomp_dispatch.c`, D3D kickoff in `recomp_0109.c` which is off by default) and `apply_hooks.py`, which applies them.
 - `sg1_alliance/tools/make_hdpack.py` - builds the HD texture pack from your own game files (see HD texture pack below).
@@ -30,8 +30,8 @@ sg1_alliance\setup_sg1.bat "C:\path\to\your game folder" --build
 ```
 
 It generates the recompiled code from your `default.xbe`, applies our fixes to it, then builds. If something fails it stops and says which step; fix that and run the same line again (finished steps are skipped).
-3. Start the game: `sg1_alliance\build\Release\dbglaunch.exe sg1_alliance_recomp.exe`. The exe finds `default.xbe` in its own folder or a parent folder; if your game is elsewhere set `RECOMP_GAME_DIR` to its folder first.
-Playing it from your game folder: copy everything in `sg1_alliance\build\Release` (`sg1_alliance_recomp.exe`, `dbglaunch.exe`, the `texpack` folder and the `.map` file; `sg1_settings.txt` appears on first run) into the game folder, right next to `default.xbe`, and start it from there. Copy the whole set, not just the exe, or the HD textures and settings will be missing.
+3. Start the game: run `sg1_alliance\build\Release\sg1_alliance_recomp.exe` (double-click is fine). The exe finds `default.xbe` in its own folder or a parent folder; if your game is elsewhere set `RECOMP_GAME_DIR` to its folder first.
+Playing it from your game folder: copy everything in `sg1_alliance\build\Release` (`sg1_alliance_recomp.exe`, the `texpack` folder and the `.map` file; `sg1_settings.txt` appears on first run) into the game folder, right next to `default.xbe`, and start it from there. Copy the whole set, not just the exe, or the HD textures and settings will be missing.
 4. Optional: the HD texture pack (below) and `sg1_alliance\tools\patches\sg1patch.py` (fixes a bug in the game's own script files). The Insert key opens the in-game settings.
 
 Do not try to run the pieces by hand unless you have to: the generated code must be patched with `game_hooks\apply_hooks.py` (setup does this) or the keyboard, menu mouse, gamma and network pieces will be missing. `python sg1_alliance\game_hooks\apply_hooks.py --check` shows whether they are applied.
@@ -57,7 +57,7 @@ Want your own AI-upscaled or hand-painted versions? Put a PNG with the **same fi
 From `sg1_alliance\build\Release`:
 
 ```
-dbglaunch.exe sg1_alliance_recomp.exe
+sg1_alliance_recomp.exe
 ```
 
 Useful environment variables (some are set by default in `main.c`): `RECOMP_PB_EXEC=1`, `RECOMP_GPU=1`, `RECOMP_FB_WINDOW=1`, `RECOMP_VBLANK=paced`, `RECOMP_MKB=1` (mouse and keyboard). Variables set with `set` stay in a command window, so use a fresh prompt when measuring performance.
