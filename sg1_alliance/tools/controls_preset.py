@@ -4,6 +4,8 @@ The dump's default layout is the PC prototype layout (Ctrl=Jump, Alt=Fire, Z=Str
 
     B = ToggleBehindView (third person)     Ctrl = Duck        CapsLock = toggleInvisibility
     Z = ZoomToggle                          Alt, Backspace, Q = unbound (Alt releases the mouse pointer)
+    W/A/S/D walking strength: the Xbox bindings (Speed=+-1200, scaled by frame time) give a tiny acceleration for keys, so
+    walking felt stuck; forward/strafe-right use SpeedBase=+20000 (like the stick), back/strafe-left Speed=-30000.
 
     python sg1_alliance\\tools\\controls_preset.py "C:\\path\\to\\game folder"            apply
     python sg1_alliance\\tools\\controls_preset.py "C:\\path\\to\\game folder" --revert   restore the backups (*.orig_sg1)
@@ -14,6 +16,9 @@ a = [x for x in sys.argv[1:]]
 if not a or a[0].startswith('--'): print(__doc__); sys.exit(1)
 sysdir = os.path.join(a[0].strip('"'), 'System'); revert = '--revert' in a
 KEYS = [('Ctrl', 'Duck'), ('Alt', ''), ('CapsLock', 'toggleInvisibility'), ('Z', 'ZoomToggle'), ('Backspace', ''), ('B', 'ToggleBehindView'), ('Q', '')]
+ALIASES = {'MoveForward': 'Axis aBaseY SpeedBase=+20000.0', 'MoveBackward': 'Axis aBaseY Speed=-30000.0',
+           'StrafeLeft': 'Axis aStrafe Speed=-30000.0', 'StrafeRight': 'Axis aStrafe SpeedBase=+20000.0'}
+import re
 done = 0
 for name in ('User.ini', 'DefUser.ini'):
     p = os.path.join(sysdir, name); bak = p + '.orig_sg1'
@@ -36,6 +41,10 @@ for name in ('User.ini', 'DefUser.ini'):
                     if k.lower() == kk.lower():
                         seen.add(kk)
                         if l.split('=', 1)[1].strip() != vv: lines[i] = kk + '=' + vv; changed += 1
+    for i, l in enumerate(lines):   # walking strength aliases
+        m = re.match(r'^(Aliases\[\d+\]=\(Command=")([^"]*)(",Alias=)(\w+)\)\s*$', l)
+        if m and m.group(4) in ALIASES and m.group(2) != ALIASES[m.group(4)]:
+            lines[i] = m.group(1) + ALIASES[m.group(4)] + m.group(3) + m.group(4) + ')'; changed += 1
     missing = [(k, v) for k, v in KEYS if k not in seen]
     if missing and last_in is not None:
         pos = last_in + 1
