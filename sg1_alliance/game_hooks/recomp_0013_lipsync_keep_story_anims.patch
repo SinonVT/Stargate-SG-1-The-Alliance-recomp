@@ -1,0 +1,11 @@
+--- a/recomp_0013.c
++++ b/recomp_0013.c
+@@ -36384,6 +36384,8 @@
+     PUSH32(esp, 0x000B9A2Fu); RECOMP_ABI_CALL(0x00056260u, sub_00056260); /* call 0x00056260 */
+ 
+ loc_000B9A2F: ;
++    /* SG1LIP: keep story-line lip animations (m##_...) that the level prefix list does not name */
++    { uint32_t _nm = MEM32(esp); if (eax != 0 && _nm && MEM16(_nm)=='m' && MEM16(_nm+2)>='0' && MEM16(_nm+2)<='9' && MEM16(_nm+4)>='0' && MEM16(_nm+4)<='9' && MEM16(_nm+6)=='_') eax = 0; }
+     _fb = (uint32_t)(8) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* add source, before the write */
+     esp = esp + 8;
+     _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* add result */
