@@ -665,8 +665,11 @@ static int nm_next(int *vk, int *down, int *rep, int *ch)
         fprintf(stderr, "[MKB] typing %s%s\n", s_cmd[0] ? s_cmd : "SetName ", s_cmd[0] ? "" : s_prof); fflush(stderr);
     }
     if (!s_nm_n) return 0;
-    if (s_nm_i >= s_nm_n) { s_nm_n = 0; s_nm_due = 0; s_nm_done = 1; s_cmd[0] = 0; s_nm_end = (LONG)(now + 400); return 0; }
-    if (now - s_nm_t < (s_nm_i < 2 ? 150u : 35u)) return 0;
+    if (s_nm_i >= s_nm_n) { s_nm_n = 0; s_nm_due = 0; s_nm_done = 1; s_cmd[0] = 0; s_nm_end = (LONG)(now + 100); return 0; }
+    {   static int ms = -1;      /* key spacing in ms; was 35, now 1. RECOMP_TYPE_MS overrides it (raise it if typed commands lose characters) */
+        if (ms < 0) { const char *e = getenv("RECOMP_TYPE_MS"); ms = e ? atoi(e) : 1; if (ms < 1) ms = 1; if (ms > 200) ms = 200; }
+        if (now - s_nm_t < (s_nm_i < 2 ? 40u : (unsigned)ms)) return 0;
+    }
     s_nm_t = now;
     *vk = s_nm_seq[s_nm_i].vk; *down = s_nm_seq[s_nm_i].down; *rep = 0; *ch = s_nm_seq[s_nm_i].ch;
     s_nm_i++;
