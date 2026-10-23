@@ -298,13 +298,65 @@ static int s_mn_page;
 static const int s_mn_main[] = { 0, 1, 2, 114, 113, 116, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
 static const int s_mn_dbg[]  = { 115, 111, 112, 105, 106, 107, 901 };
 
-static int mn_items(void) { return s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
-static int mn_code(int i) { return s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
+/* Page 2: secret NPC spawner (Del). Types "summon StargateContent.<name>" into the game console. */
+static const char *const s_npc[] = {
+    "JaffaHorusL", "JaffaHorusM", "JaffaHorusH", "JaffaSerpentL", "JaffaSerpentM", "JaffaSerpentH",
+    "JaffaJackalL", "JaffaJackalM", "JaffaJackalH", "JaffaCaptain", "JaffaGrunt", "GoauldFirstPrime",
+    "HaakenGrunt", "HaakenWarrior", "HaakenLeader", "Goauld", "Anubis",
+    "Replicator", "MediumGreenReplicator", "MediumPurpleReplicator", "BigReplicator", "ReplicatorQueen",
+    "Ptero", "PteroBoss"
+};
+#define NPC_COUNT ((int)(sizeof s_npc / sizeof *s_npc))
+extern void mkb_type_command(const char *cmd, int delay_ms);
+extern int mkb_name_busy(void);
+/* Experimental: the replicator classes have no mesh in this build. Assign one with the console's `set`, then summon. */
+static const struct { const char *cls, *set_cmd, *summon, *kill, *skin; } s_exp[] = {
+    { "ReplicatorQueen",       "set ReplicatorQueen Mesh SkeletalMesh'replicator_queen.replicator_queen'", "summon StargateContent.ReplicatorQueen", "killall StargateContent.ReplicatorQueen", NULL },
+    { "Replicator",            "set Replicator Mesh SkeletalMesh'ReplicatorAnims.repmesh17'",             "summon StargateContent.Replicator", "killall StargateContent.Replicator", NULL },
+    { "BigReplicator",         "set BigReplicator Mesh SkeletalMesh'ReplicatorAnims.bigrep'",             "summon StargateContent.BigReplicator", "killall StargateContent.BigReplicator", NULL },
+    /* the medium ones used to come out as the small mesh; the mesh only references the green texture, so purple gets a skin */
+    { "MediumGreenReplicator",  "set MediumGreenReplicator Mesh SkeletalMesh'ReplicatorAnims.repmesh18'",  "summon StargateContent.MediumGreenReplicator",  "killall StargateContent.MediumGreenReplicator",  NULL },
+    { "MediumPurpleReplicator", "set MediumPurpleReplicator Mesh SkeletalMesh'ReplicatorAnims.repmesh18'", "summon StargateContent.MediumPurpleReplicator", "killall StargateContent.MediumPurpleReplicator", "set MediumPurpleReplicator Skins (Texture'ReplicatorTex.RepTexPink')" },
+};
+#define EXP_COUNT ((int)(sizeof s_exp / sizeof *s_exp))
+static const char *s_chain[5]; static int s_chain_n, s_chain_i;
+static void mn_chain_tick(void)
+{   /* types the queued console commands one after another, each once the previous has finished */
+    if (s_chain_i < s_chain_n && !mkb_name_busy()) mkb_type_command(s_chain[s_chain_i++], 300);
+}
+static void mn_spawn_npc(int i)
+{
+    char cmd[64];
+    if (i < 0 || i >= NPC_COUNT) return;
+    {   int k;   /* the replicators have no mesh in this build: assign one first (see s_exp) */
+        static int done[EXP_COUNT];   /* the mesh stays assigned for the rest of the run, so later spawns need only the summon */
+        for (k = 0; k < EXP_COUNT; k++) if (!strcmp(s_npc[i], s_exp[k].cls)) {
+            if (done[k] && !(GetAsyncKeyState(VK_SHIFT) & 0x8000)) {   /* hold Shift to redo the whole sequence (e.g. after a map change) */
+                s_chain[0] = s_exp[k].summon; s_chain_n = 1; s_chain_i = 0;
+                return;
+            }
+            done[k] = 1;
+            /* summon first so the class is loaded (`set` only finds loaded classes), then set the mesh, then summon again */
+            s_chain[0] = s_exp[k].summon; s_chain[1] = s_exp[k].set_cmd;
+            s_chain_n = 2;
+            if (s_exp[k].skin) s_chain[s_chain_n++] = s_exp[k].skin;
+            s_chain[s_chain_n++] = s_exp[k].kill;   /* remove the first (meshless) one so the second does not collide with it */
+            s_chain[s_chain_n++] = s_exp[k].summon;
+            s_chain_i = 0;
+            return;
+        }
+    }
+    snprintf(cmd, sizeof cmd, "summon StargateContent.%s", s_npc[i]);
+    mkb_type_command(cmd, 400);          /* the console is typed after the menu has closed */
+}
+static int mn_items(void) { return s_mn_page == 2 ? NPC_COUNT : s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
+static int mn_code(int i) { return s_mn_page == 2 ? 1000 + i : s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
 
 static void mn_text(int i, char *b, int n)
 {
     int c = mn_code(i);
     b[0] = 0;
+    if (c >= 1000) { if (c - 1000 < NPC_COUNT) snprintf(b, n, "%s", s_npc[c - 1000]); return; }
     if (c == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
     else if (c == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
     else if (c == 2) snprintf(b, n, "Game controllers    < %s >", sg1_controllers_on() ? "on" : "off");
@@ -363,10 +415,15 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
     int up = mn_key_edge(VK_UP, &p_up), dn = mn_key_edge(VK_DOWN, &p_dn);
     int lt = mn_key_edge(VK_LEFT, &p_lt), rt = mn_key_edge(VK_RIGHT, &p_rt);
     int ret = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+    static int p_pgup;
+    int pgup = mn_key_edge(VK_DELETE, &p_pgup);   /* Del opens the secret NPC spawner */
     static int p_ret;
     int rete = ret && !p_ret;
     p_ret = ret;
+    mn_chain_tick();
     if (!fg) return;
+    if (pgup) { if (open && s_mn_page == 2) { open = 0; g_sg1_menu_open = 0; } else { open = 1; g_sg1_menu_open = 1; s_mn_page = 2; s_mn_sel = 0; } ins = 0; esc = 0; }
+    if (open && esc && s_mn_page == 2) { open = 0; g_sg1_menu_open = 0; esc = 0; ins = 0; }
     if (open && esc && s_mn_page) { s_mn_page = 0; s_mn_sel = 0; esc = 0; ins = 0; }   /* Esc on the debug page goes back */
     if (ins || (open && esc)) { open = !open; g_sg1_menu_open = open; if (open) { s_mn_sel = 0; s_mn_page = 0; } }
     if (!open || !px || w < 160 || h < 120) return;
@@ -374,11 +431,25 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
         int n = mn_items(), r;
         if (up) s_mn_sel = (s_mn_sel + n - 1) % n;
         if (dn) s_mn_sel = (s_mn_sel + 1) % n;
+        if (s_mn_page == 2) {
+            if (rt) { mn_spawn_npc(s_mn_sel); open = 0; g_sg1_menu_open = 0; return; }
+        } else {
         if (lt) { if (s_mn_page && mn_code(s_mn_sel) == 901) mn_change(s_mn_sel, +1); else mn_change(s_mn_sel, -1); }
         if (rt || rete) mn_change(s_mn_sel, +1);
+        }
+        n = mn_items();                               /* a page change above (Debug menu) changes the row count */
+        if (s_mn_sel >= n) s_mn_sel = 0;
         {
             int fpx = (int)h / 28; if (fpx < 14) fpx = 14; if (fpx > 40) fpx = 40;
-            int pw = fpx * (s_mn_page ? 40 : 22), ph = fpx * (n + 4), x0 = fpx, y0 = fpx, x, y;
+            int pw = fpx * (s_mn_page == 1 ? 40 : s_mn_page == 2 ? 34 : 22), x0 = fpx, y0 = fpx, x, y;
+            static int s_top;
+            int rows = n, ph;
+            { int vis = ((int)h - 2 * y0) / fpx - 4; if (vis < 4) vis = 4; if (rows > vis) rows = vis; }   /* long lists scroll instead of running off the screen */
+            if (s_mn_sel < s_top) s_top = s_mn_sel;
+            if (s_mn_sel >= s_top + rows) s_top = s_mn_sel - rows + 1;
+            if (s_top > n - rows) s_top = n - rows;
+            if (s_top < 0) s_top = 0;
+            ph = fpx * (rows + 4);
             BITMAPINFO bi; void *bits = NULL; HBITMAP bmp; HDC dc; HFONT fnt, old; RECT rc; uint32_t *dib;
             if (pw > (int)w - 2 * x0) pw = (int)w - 2 * x0;
             if (ph > (int)h - 2 * y0) ph = (int)h - 2 * y0;
@@ -396,10 +467,10 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
             old = (HFONT)SelectObject(dc, fnt);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(255, 255, 255));
-            { const char *tt = s_mn_page ? "DEBUG  (Esc = back, Insert closes)" : "SETTINGS  (Insert closes)"; TextOutA(dc, fpx / 2, fpx / 3, tt, (int)strlen(tt)); }
-            for (r = 0; r < n; r++) {
+            { const char *tt = s_mn_page == 2 ? "NPC SPAWNER  (Right = spawn, Del/Esc closes)" : s_mn_page ? "DEBUG  (Esc = back, Insert closes)" : "SETTINGS  (Insert closes)"; TextOutA(dc, fpx / 2, fpx / 3, tt, (int)strlen(tt)); }
+            for (r = s_top; r < s_top + rows; r++) {
                 char line[96];
-                int ty = fpx * (r + 2);
+                int ty = fpx * (r - s_top + 2);
                 mn_text(r, line, sizeof line);
                 if (r == s_mn_sel) {
                     HBRUSH hb = CreateSolidBrush(RGB(40, 70, 170));
@@ -410,7 +481,7 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
                 TextOutA(dc, fpx / 2, ty, line, (int)strlen(line));
             }
             SetTextColor(dc, RGB(150, 150, 150));
-            { const char *hl = "Up/Down select  Left/Right change"; TextOutA(dc, fpx / 2, fpx * (n + 2) + fpx / 3, hl, (int)strlen(hl)); }
+            { char hl[96]; if (s_mn_page == 2) snprintf(hl, sizeof hl, "Hold Shift + Right to redo the replicator setup (%d/%d)", s_mn_sel + 1, n); else if (rows < n) snprintf(hl, sizeof hl, "Up/Down select  (%d/%d)", s_mn_sel + 1, n); else snprintf(hl, sizeof hl, "Up/Down select  Left/Right change"); TextOutA(dc, fpx / 2, fpx * (rows + 2) + fpx / 3, hl, (int)strlen(hl)); }
             SelectObject(dc, old); DeleteObject(fnt);
             GdiFlush();
             dib = (uint32_t *)bits;

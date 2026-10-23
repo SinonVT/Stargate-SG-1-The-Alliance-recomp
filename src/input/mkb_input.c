@@ -615,9 +615,9 @@ int mkb_game_mouse(int *dx, int *dy)
  * "SetName <profile>" fixes both the player name and the default URL, so the
  * recompiled build types it into the console by itself. */
 static char s_prof[40];
-static char s_cmd[48];                                       /* generic console command to type (FOV etc.) */
+static char s_cmd[128];                                       /* generic console command to type (FOV etc.) */
 static volatile LONG s_nm_due, s_nm_done;                 /* tick at which to type, 0 = idle */
-static KbEvt s_nm_seq[160]; static int s_nm_n, s_nm_i; static DWORD s_nm_t;
+static KbEvt s_nm_seq[320]; static int s_nm_n, s_nm_i; static DWORD s_nm_t;
 void mkb_set_profile(const char *name)
 {
     int i, n = 0;
@@ -646,9 +646,9 @@ void mkb_arm_name(int delay_ms)
     s_nm_due = due; s_nm_n = 0; s_nm_i = 0;
     fprintf(stderr, "[MKB] will set in-game name in %d ms\n", delay_ms); fflush(stderr);
 }
-static void nm_add(unsigned vk, int down, unsigned ch) { if (s_nm_n < 158) { s_nm_seq[s_nm_n].vk = (unsigned short)vk; s_nm_seq[s_nm_n].down = (unsigned char)down; s_nm_seq[s_nm_n].rep = 0; s_nm_seq[s_nm_n].ch = (unsigned short)ch; s_nm_n++; } }
+static void nm_add(unsigned vk, int down, unsigned ch) { if (s_nm_n < 318) { s_nm_seq[s_nm_n].vk = (unsigned short)vk; s_nm_seq[s_nm_n].down = (unsigned char)down; s_nm_seq[s_nm_n].rep = 0; s_nm_seq[s_nm_n].ch = (unsigned short)ch; s_nm_n++; } }
 static volatile LONG s_nm_end;
-int mkb_name_busy(void) { return s_nm_n > 0 || (s_nm_end && (LONG)(GetTickCount() - (DWORD)s_nm_end) < 0); }
+int mkb_name_busy(void) { return s_nm_n > 0 || s_nm_due || (s_nm_end && (LONG)(GetTickCount() - (DWORD)s_nm_end) < 0); }
 static int nm_next(int *vk, int *down, int *rep, int *ch)
 {
     DWORD now = GetTickCount();
@@ -657,7 +657,7 @@ static int nm_next(int *vk, int *down, int *rep, int *ch)
         {   const char *cmd = s_cmd[0] ? s_cmd : "SetName "; int i;
             nm_add(0x67, 1, 0); nm_add(0x67, 0, 0);
             nm_add(0x20, 1, ' '); nm_add(0x20, 0, 0);          /* first char is swallowed */
-            for (i = 0; cmd[i]; i++) { unsigned c = (unsigned char)cmd[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : (c == ' ' ? 0x20 : c); nm_add(v, 1, c); nm_add(v, 0, 0); }
+            for (i = 0; cmd[i]; i++) { unsigned c = (unsigned char)cmd[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : (c == ' ' ? 0x20 : c == '.' ? 0xBE : c == '=' ? 0xBB : c == '\\' ? 0xDC : c == '/' ? 0xBF : c == '-' ? 0xBD : c == '\'' ? 0xDE : c == '(' ? 0x39 : c == ')' ? 0x30 : c); nm_add(v, 1, c); nm_add(v, 0, 0); }
             if (!s_cmd[0]) for (i = 0; s_prof[i]; i++) { unsigned c = (unsigned char)s_prof[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : c; nm_add(v, 1, c); nm_add(v, 0, 0); }
             nm_add(0x0D, 1, 0); nm_add(0x0D, 0, 0);
         }
