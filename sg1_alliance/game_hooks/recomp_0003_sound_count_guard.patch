@@ -1,0 +1,13 @@
+--- a/recomp_0003.c
++++ b/recomp_0003.c
+@@ -11036,6 +11036,10 @@
+     _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* sub result */
+     PUSH32(esp, ebx);
+     ebx = MEM32(ecx + 0xDC);
++    if (ebx > 4096u) {   /* SG1: the sound array count is garbage (stale audio object after a level restart); the loop below would run for billions of steps */
++        static int _sg1_sc; if (_sg1_sc++ < 20) { fprintf(stderr, "[SG1] sub_0002D120: sound array count %08X is not sane (this=%08X), using 0\n", ebx, ecx); fflush(stderr); }
++        ebx = 0;
++    }
+     PUSH32(esp, ebp);
+     PUSH32(esp, esi);
+     eax = 0; /* xor self */
