@@ -732,6 +732,8 @@ extern int g_sg1_hdpack;
 extern int g_sg1_hideph;                      /* Menu: hide the PLACE-HOLDER banner texture */
 extern uint64_t g_sg1_ph_hash[8]; extern int g_sg1_ph_n;
 extern int g_sg1_fov;
+extern int g_sg1_hudscale;
+extern int g_sg1_xhair;
 extern int g_sg1_whitepct;
 int g_sg1_cube = 1;   /* Debug menu: sample cube maps (off = neutral white, the old behaviour) */
 static struct { float z; int have; uint32_t off, fmt, w, h, lv, t1f, t1w, t1h, prog; float u, v, density, uvmax; int blend; uint32_t n; } g_pk[3];
@@ -760,6 +762,12 @@ static void settings_init(void)
       while (ph && *ph && g_sg1_ph_n < 8) { char *end; unsigned long long v = strtoull(ph, &end, 16); if (end == ph) break; g_sg1_ph_hash[g_sg1_ph_n++] = v; ph = (*end == ',') ? end + 1 : end; } }
     g_sg1_custom = sg1_cfg_int("customtex", 0) ? 1 : 0;
     g_sg1_fov = sg1_cfg_int("fov", 75);
+    e = getenv("RECOMP_HUD_SCALE");
+    g_sg1_hudscale = e ? atoi(e) : sg1_cfg_int("hudscale", 100);
+    if (g_sg1_hudscale < 50 || g_sg1_hudscale > 150) g_sg1_hudscale = 100;
+    e = getenv("RECOMP_XHAIR_SCALE");
+    g_sg1_xhair = e ? atoi(e) : sg1_cfg_int("xhair", 100);
+    if (g_sg1_xhair < 25 || g_sg1_xhair > 200) g_sg1_xhair = 100;
     g_sg1_whitepct = sg1_cfg_int("whitepct", 10);
     if (g_sg1_whitepct < 0 || g_sg1_whitepct > 100) g_sg1_whitepct = 10;
     if (g_sg1_fov < 60 || g_sg1_fov > 120) g_sg1_fov = 75;
@@ -788,6 +796,9 @@ static const GUID sg1_IID_WICFactory   = {0xec5ec8a9,0xc395,0x4314,{0x9c,0x77,0x
 static const GUID sg1_PF_BGRA          = {0x6fddc324,0x4e03,0x4bfe,{0xb1,0x85,0x3d,0x77,0x76,0x8d,0xc9,0x0f}};
 int g_sg1_whitepct = 10;   /* Debug menu: brightness (percent) given to props whose vertex colours are all white */
 int g_sg1_fov = 75;       /* Menu: field of view, sent to the game with the FOV console command */
+int g_sg1_hudscale = 100; /* Menu: HUD size in percent (the DrawActor hook in recomp_0019.c scales the HUD widgets) */
+int g_sg1_xhair = 100;  /* Menu: crosshair size in percent (small 2D quads near the screen centre are scaled about their own centre in be_draw) */
+int sg1_hud_scale_pct(void) { settings_init(); return g_sg1_hudscale; }
 int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
 int g_sg1_hideph = 0;     /* Menu: hide the PLACE-HOLDER banner (matched by pixel hash, see [TEX256] in the debug log) */
 uint64_t g_sg1_ph_hash[8]; int g_sg1_ph_n;
@@ -1568,6 +1579,58 @@ static void be_draw(const Nv2aSurface *s, const Nv2aBatchEx *b)
                 }
             }
         }
+        {   /* SG1: crosshair size. The crosshair is four small alpha-blended 2D quads (HUD_reticule_aim_*) around the screen centre;
+             * scale each about its own centre by the menu percentage. Off at 100%. [XHAIR] logs what matched (debug logs on). */
+            settings_init();
+            if (g_sg1_xhair != 100 && (b->count == 4 || b->count == 6) && rs->blend_enable && b->tex[0].width <= 128 && b->tex[0].height <= 128 && s->width >= 480) {
+                const Nv2aXfVertex *sv = b->vertices;
+                float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, cx, cy, w, h, sw = (float)s->width, sh = (float)s->height;
+                uint32_t vi;
+                for (vi = 0; vi < b->count; vi++) {
+                    if (sv[vi].pos[0] < x0) x0 = sv[vi].pos[0]; if (sv[vi].pos[0] > x1) x1 = sv[vi].pos[0];
+                    if (sv[vi].pos[1] < y0) y0 = sv[vi].pos[1]; if (sv[vi].pos[1] > y1) y1 = sv[vi].pos[1];
+                }
+                cx = (x0 + x1) * 0.5f; cy = (y0 + y1) * 0.5f; w = x1 - x0; h = y1 - y0;
+                if (w > 2.0f && h > 2.0f && w < 0.2f * sw && h < 0.2f * sh && fabsf(cx - sw * 0.5f) < 0.2f * sw && fabsf(cy - sh * 0.5f) < 0.2f * sh) {
+                    Nv2aXfVertex *dv = (Nv2aXfVertex *)((uint8_t *)m.pData + g_vb_pos);
+                    float f = (float)g_sg1_xhair / 100.0f;
+                    static unsigned nxh;
+                    for (vi = 0; vi < b->count; vi++) { dv[vi].pos[0] = sw * 0.5f + (sv[vi].pos[0] - sw * 0.5f) * f; dv[vi].pos[1] = sh * 0.5f + (sv[vi].pos[1] - sh * 0.5f) * f; }   /* about the screen centre: arrows shrink AND move closer */
+                    if (g_dbg_log && nxh < 40) { nxh++; fprintf(stderr, "[XHAIR] n=%u quad %.0fx%.0f at (%.0f,%.0f) surf %ux%u tex %08X %ux%u fmt%02X x%.2f\n", b->count, w, h, cx, cy, s->width, s->height, b->tex[0].offset, b->tex[0].width, b->tex[0].height, b->tex[0].color, f); }
+                }
+            }
+        }
+        {   /* SG1: HUD text and icons are 2D quads the game draws right after each HUD widget, at the widget's screen position. When the HUD size
+             * is not 100% scale them about that widget (the 3D parts are scaled by the DrawActor hook). The quad is matched to the nearest widget
+             * from the table the hook keeps; crosshair-sized centre quads and the like are left alone. */
+            extern struct sg1_anch { uint32_t id; float x, y, ax; } g_sg1_anch[96]; extern volatile int g_sg1_nanch;
+            settings_init();
+            if (g_sg1_hudscale != 100 && s->width >= 480 && b->count >= 4 && b->count <= 1200) {
+                const Nv2aXfVertex *sv = b->vertices;
+                float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, sw = (float)s->width, sh = (float)s->height, wmax = 0;
+                uint32_t vi;
+                for (vi = 0; vi < b->count; vi++) {
+                    if (sv[vi].pos[0] < x0) x0 = sv[vi].pos[0]; if (sv[vi].pos[0] > x1) x1 = sv[vi].pos[0];
+                    if (sv[vi].pos[1] < y0) y0 = sv[vi].pos[1]; if (sv[vi].pos[1] > y1) y1 = sv[vi].pos[1];
+                    if (sv[vi].pos[3] > wmax) wmax = sv[vi].pos[3];
+                }
+                if (wmax <= 1.5f && (x1 - x0) < 0.4f * sw && (y1 - y0) < 0.25f * sh) {
+                    float fx = (x0 + x1) * 0.5f / sw, fy = (y0 + y1) * 0.5f / sh, best = 1e9f, px = 0, py = 0;
+                    int i, n = g_sg1_nanch;
+                    for (i = 0; i < n; i++) {
+                        float dx = fx - g_sg1_anch[i].x, dy = (fy - g_sg1_anch[i].y) * 1.78f;
+                        float d = dx * dx + dy * dy;
+                        if (fabsf(g_sg1_anch[i].x - 0.5f) < 0.1f && fabsf(g_sg1_anch[i].y - 0.5f) < 0.15f) continue;   /* centre widgets: crosshair etc. */
+                        if (d < best && fabsf(dx) < 0.16f && fabsf(dy) < 0.12f) { best = d; px = g_sg1_anch[i].ax; py = g_sg1_anch[i].y; }
+                    }
+                    if (best < 1e8f) {
+                        Nv2aXfVertex *dv = (Nv2aXfVertex *)((uint8_t *)m.pData + g_vb_pos);
+                        float f = (float)g_sg1_hudscale / 100.0f, cx = px * sw, cy = py * sh;
+                                                for (vi = 0; vi < b->count; vi++) { dv[vi].pos[0] = cx + (sv[vi].pos[0] - cx) * f; dv[vi].pos[1] = cy + (sv[vi].pos[1] - cy) * f; }
+                    }
+                }
+            }
+        }
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
         off = g_vb_pos;
         g_vb_pos += bytes;
@@ -2139,6 +2202,10 @@ static void bm_text(int item, char *b, int n)
         snprintf(b, n, "White prop level    < %d%% >", g_sg1_whitepct);
     else if (item == 14)
         snprintf(b, n, "Field of view       < %d >", g_sg1_fov);
+    else if (item == 17)
+        snprintf(b, n, "HUD size            < %d%% >", g_sg1_hudscale);
+    else if (item == 18)
+        snprintf(b, n, "Crosshair size      < %d%% >", g_sg1_xhair);
     else if (item == 16)
         snprintf(b, n, "Hide PLACE-HOLDER   < %s >", g_sg1_hideph ? "on" : "off");
     else if (item == 13)
@@ -2202,6 +2269,18 @@ static void bm_change(int item, int dir)
         sg1_cfg_set("fov", v);
         snprintf(cmd, sizeof cmd, "FOV %d", sg1_hor_plus(g_sg1_fov));
         mkb_type_command(cmd, 700);   /* typed into the game console once you stop pressing */
+    } else if (item == 18) {
+        g_sg1_xhair += dir > 0 ? 5 : -5;
+        if (g_sg1_xhair < 25) g_sg1_xhair = 25;
+        if (g_sg1_xhair > 200) g_sg1_xhair = 200;
+        snprintf(v, sizeof v, "%d", g_sg1_xhair);
+        sg1_cfg_set("xhair", v);
+    } else if (item == 17) {
+        g_sg1_hudscale += dir > 0 ? 5 : -5;
+        if (g_sg1_hudscale < 50) g_sg1_hudscale = 50;
+        if (g_sg1_hudscale > 150) g_sg1_hudscale = 150;
+        snprintf(v, sizeof v, "%d", g_sg1_hudscale);
+        sg1_cfg_set("hudscale", v);
     } else if (item == 16) {
         g_sg1_hideph = !g_sg1_hideph;
         sg1_cfg_set("hideph", g_sg1_hideph ? "1" : "0");
@@ -2399,6 +2478,6 @@ void sg1_gpu_backend_install(void)
     extern int (*xbox_fb_hires_hook)(uint32_t, const uint32_t **, uint32_t *, uint32_t *);
     nv2a_backend_register_ex(&g_backend);
     xbox_fb_hires_hook = sg1_hires_grab;
-    g_sg1_bm_count = 17; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
+    g_sg1_bm_count = 19; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
     fprintf(stderr, "[GPU11] D3D11 back end registered\n");
 }

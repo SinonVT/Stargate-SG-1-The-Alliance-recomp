@@ -43,6 +43,22 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 int g_sg1_mode_w = 640, g_sg1_mode_h = 480;   /* last display mode the game selected (set by the FindMode hook) */
+int g_sg1_hud_off = -1, g_sg1_cam_off = -1; uint32_t g_sg1_hud_actor; float g_sg1_hud_save[3];   /* DrawActor hook: where AActor::Location sits, and the widget being moved */
+void sg1_hud_log(int off, float f, float r, float u) { fprintf(stderr, "[HUDLOC] camera vector in the controller at +0x%X (widget fwd %.1f right %.1f up %.1f)\n", off, f, r, u); }
+struct sg1_anch { uint32_t id; float x, y, ax; }; struct sg1_anch g_sg1_anch[96]; volatile int g_sg1_nanch;   /* HUD widget screen positions (fractions) for the 2D text/icon scaling in be_draw */
+void sg1_hud_anchor(uint32_t id, float x, float y, float ax) { int i, n = g_sg1_nanch; for (i = 0; i < n; i++) if (g_sg1_anch[i].id == id) { g_sg1_anch[i].x = x; g_sg1_anch[i].y = y; g_sg1_anch[i].ax = ax; return; } if (n < 96) { g_sg1_anch[n].id = id; g_sg1_anch[n].x = x; g_sg1_anch[n].y = y; g_sg1_anch[n].ax = ax; g_sg1_nanch = n + 1; } }
+/* Squad panel (Jackson/Carter/Teal'c): each row is four 3D widgets that slide in together - name (frame-0.034), frame, face (+0.055), "C" icon (+0.108).
+ * The frame is rigid, so the other three keep their offset from it: return the frame's x (the second smallest x of the row) as the pivot. */
+float sg1_hud_pivot(uint32_t id, float xf, float yf) {
+    float xs[16]; int i, j, k = 0, n = g_sg1_nanch;
+    sg1_hud_anchor(id, xf, yf, xf);
+    if (!(xf < 0.4f && yf > 0.28f && yf < 0.62f)) return xf;
+    for (i = 0; i < n && k < 16; i++) if (g_sg1_anch[i].x < 0.4f && fabsf(g_sg1_anch[i].y - yf) < 0.03f) xs[k++] = g_sg1_anch[i].x;
+    if (k < 3) return xf;
+    for (i = 0; i < k; i++) for (j = i + 1; j < k; j++) if (xs[j] < xs[i]) { float t = xs[i]; xs[i] = xs[j]; xs[j] = t; }
+    return xs[1];
+}
+void sg1_hud_dbg(int tag, float a, float b, float c, float d) { static int n[8]; static int seen[512]; static int ns; if (tag == 3 || tag == 5) { int i, id = (int)d + (int)(a * 100.0f + 1000.0f) * 65536; for (i = 0; i < ns; i++) if (seen[i] == id + tag * 65536) return; if (ns < 512) seen[ns++] = id + tag * 65536; } if (tag >= 0 && tag < 8 && n[tag] < (tag == 3 ? 400 : 20)) { n[tag]++; fprintf(stderr, "[HUDDBG] %d: %.2f %.2f %.2f %.2f\n", tag, a, b, c, d); } }   /* 1 unused, 2 scan failed (best offset, fwd, right, up), 3 widget placed (fwd, right, up, stretch), 4 camera (x y z yaw) */
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include

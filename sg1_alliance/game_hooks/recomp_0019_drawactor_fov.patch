@@ -1,20 +1,83 @@
 --- a/recomp_0019.c
 +++ b/recomp_0019.c
-@@ -7586,6 +7586,17 @@
+@@ -7586,6 +7586,72 @@
      }
  
  loc_001022E4: ;
-+    { /* SG1 ultrawide: DrawActor's DisplayFOV is horizontal; HUD widgets (90), the gun and hands are placed for 4:3.
-+       * Widen it so the vertical extent stays what 4:3 gave. */
-+      extern int g_sg1_mode_w, g_sg1_mode_h;
++    { /* SG1 wide screen: DrawActor's DisplayFOV is horizontal and the HUD widgets (UIWidget: FOV 90, DontQueue), the gun and the
++       * hands are placed for 4:3. Widen the FOV so the vertical extent stays what 4:3 gave. HUD widgets are also moved: their
++       * camera-space offsets are stretched sideways by the same factor (so they sit at the screen edges like in 4:3 and the pieces
++       * parked off-screen stay hidden) and everything is scaled by the HUD size setting (Insert menu, default 100%).
++       * A widget's Location (+0x154) and Rotation (+0x160) are CalcViewLocation + R * offset and CalcViewRotation; the camera
++       * (CalcViewLocation) is a vector inside the PlayerController that lies 15 units behind the widget plane, found once by scanning. */
++      extern int g_sg1_mode_w, g_sg1_mode_h, g_sg1_cam_off; extern uint32_t g_sg1_hud_actor; extern float g_sg1_hud_save[3];
++      extern int sg1_hud_scale_pct(void); extern void sg1_hud_anchor(uint32_t id, float x, float y, float ax); extern float sg1_hud_pivot(uint32_t id, float xf, float yf); extern void sg1_hud_log(int off, float f, float r, float u); extern void sg1_hud_dbg(int tag, float a, float b, float c, float d);
++      g_sg1_hud_actor = 0;
 +      if (g_sg1_mode_w > 0 && g_sg1_mode_h > 0) {
 +        float _a = (float)g_sg1_mode_w / (float)g_sg1_mode_h, _f = MEMF(esp + 0xC);
-+        if (_a > 1.4f && _f > 1.0f && _f < 170.0f) {
-+            float _t = tanf(_f * 0.5f * 0.017453292f) * (_a * 0.75f);
++        uint32_t _act = MEM32(esp + 0x18);
++        int _hud = (_act != 0) && (MEM8(esp + 0x20) != 0) && _f > 89.0f && _f < 91.0f;
++        float _s = _hud ? (float)sg1_hud_scale_pct() / 100.0f : 1.0f;
++        if (_s < 0.4f) _s = 0.4f; if (_s > 1.6f) _s = 1.6f;
++        if (_f > 1.0f && _f < 170.0f && (_a > 1.4f || (_hud && (_s < 0.99f || _s > 1.01f)))) {
++            float _kx = (_a > 1.0f ? _a : 1.0f) * 0.75f / _s;
++            float _t = tanf(_f * 0.5f * 0.017453292f) * _kx;
 +            MEMF(esp + 0xC) = 2.0f * atanf(_t) * 57.29578f;
++            if (_hud) {
++                uint32_t _pc = MEM32(MEM32(ebx + 0xBC) + 0x30);
++                float _wx = MEMF(_act + 0x154), _wy = MEMF(_act + 0x158), _wz = MEMF(_act + 0x15C);
++                float _pi = (float)(int32_t)MEM32(_act + 0x160) * 9.5873799e-5f, _yw = (float)(int32_t)MEM32(_act + 0x164) * 9.5873799e-5f, _ro = (float)(int32_t)MEM32(_act + 0x168) * 9.5873799e-5f;
++                float _SP = sinf(_pi), _CP = cosf(_pi), _SY = sinf(_yw), _CY = cosf(_yw), _SR = sinf(_ro), _CR = cosf(_ro);
++                float _X[3] = { _CP * _CY, _CP * _SY, _SP };
++                float _Y[3] = { _SR * _SP * _CY - _CR * _SY, _SR * _SP * _SY + _CR * _CY, -_SR * _CP };
++                float _Z[3] = { -(_CR * _SP * _CY + _SR * _SY), _CY * _SR - _CR * _SP * _SY, _CR * _CP };
++                float _cx = 0, _cy = 0, _cz = 0; int _have = 0;
++                if (g_sg1_cam_off < 0) {   /* find CalcViewLocation: a vector in the controller from which the widget lies ~15 units straight ahead-ish */
++                    int _o;
++                    for (_o = 0x630; _o <= 0x800; _o += 4) {
++                        float _dx = _wx - MEMF(_pc + _o), _dy = _wy - MEMF(_pc + _o + 4), _dz = _wz - MEMF(_pc + _o + 8);
++                        float _lx = _dx * _X[0] + _dy * _X[1] + _dz * _X[2], _ly = _dx * _Y[0] + _dy * _Y[1] + _dz * _Y[2], _lz = _dx * _Z[0] + _dy * _Z[1] + _dz * _Z[2];
++                        if (_lx > 12.0f && _lx < 18.0f && _ly > -600.0f && _ly < 600.0f && _lz > -600.0f && _lz < 600.0f && (_dx != 0.0f || _dy != 0.0f || _dz != 0.0f)) { g_sg1_cam_off = _o; sg1_hud_log(_o, _lx, _ly, _lz); break; }
++                    }
++                    if (g_sg1_cam_off < 0) sg1_hud_dbg(2, _wx - MEMF(_pc + 0x154), _wy - MEMF(_pc + 0x158), _wz - MEMF(_pc + 0x15C), 0.0f);
++                }
++                if (g_sg1_cam_off >= 0) { _cx = MEMF(_pc + g_sg1_cam_off); _cy = MEMF(_pc + g_sg1_cam_off + 4); _cz = MEMF(_pc + g_sg1_cam_off + 8); _have = 1; }
++                if (_have) {
++                    float _dx = _wx - _cx, _dy = _wy - _cy, _dz = _wz - _cz;
++                    float _lx = _dx * _X[0] + _dy * _X[1] + _dz * _X[2], _ly = _dx * _Y[0] + _dy * _Y[1] + _dz * _Y[2], _lz = _dx * _Z[0] + _dy * _Z[1] + _dz * _Z[2];
++                    if (!(_lx > 1.0f && _lx < 200.0f)) sg1_hud_dbg(5, _lx, _ly, _lz, (float)(_act & 0xFFFF));
++                    if (_lx > 1.0f && _lx < 200.0f) {   /* sane widget placement only */
++                        g_sg1_hud_save[0] = _wx; g_sg1_hud_save[1] = _wy; g_sg1_hud_save[2] = _wz;
++                        g_sg1_hud_actor = _act;
++                        {   /* Positions are placed as fractions of the screen width and the text is drawn at the same fractions, so scale every
++                             * widget's offset from the centre (that keeps bars and text lined up). The two exceptions are the player's portrait
++                             * (PlayerPos x=0.10) and the weapon icon (WeaponIconPos x=0.875): they sit INSIDE the rigid frame meshes, so they follow
++                             * their frame (x=0.20 / 0.80) and keep their offset from it. The widget plane is 30 x 22.5 units (UIWidget defaults; fraction = 0.5 + right/30). */
++                            float _xf = 0.5f + _ly / 30.0f, _ax = _xf, _aly;
++                            if (fabsf(0.5f - _lz / 22.5f - 0.115f) < 0.03f) { if (fabsf(_xf - 0.100f) < 0.025f) _ax = 0.20f; else if (fabsf(_xf - 0.875f) < 0.025f) _ax = 0.80f; }   /* player HUD row only (y 0.115); the squad frame also sits at x 0.09 */
++                            if (_ax == _xf) _ax = sg1_hud_pivot(_act, _xf, 0.5f - _lz / 22.5f);   /* squad rows follow their frame */
++                            sg1_hud_dbg(3, _xf, 0.5f - _lz / 22.5f, _lx, (float)(_act & 0xFFFF));
++                            sg1_hud_anchor(_act, _xf, 0.5f - _lz / 22.5f, _ax);   /* 2D text/icons drawn after this widget are scaled about (ax, y) by the renderer */
++                            _aly = (_ax - 0.5f) * 30.0f;
++                            _ly = _aly * _kx + (_ly - _aly); _lz /= _s;
++                        }
++                        MEMF(_act + 0x154) = _cx + _X[0] * _lx + _Y[0] * _ly + _Z[0] * _lz;
++                        MEMF(_act + 0x158) = _cy + _X[1] * _lx + _Y[1] * _ly + _Z[1] * _lz;
++                        MEMF(_act + 0x15C) = _cz + _X[2] * _lx + _Y[2] * _ly + _Z[2] * _lz;
++                    }
++                }
++            }
 +        }
 +      }
 +    }
      edx = MEM32(esp + 0x20);
      eax = MEM32(esp + 0xC);
      ecx = MEM32(esp + 0x10);
+@@ -7600,6 +7666,7 @@
+     PUSH32(esp, 0x00102304u); RECOMP_ABI_CALL(0x00101EA0u, sub_00101EA0); /* call 0x00101EA0 */
+ 
+ loc_00102304: ;
++    { extern uint32_t g_sg1_hud_actor; extern float g_sg1_hud_save[3]; if (g_sg1_hud_actor) { MEMF(g_sg1_hud_actor + 0x154) = g_sg1_hud_save[0]; MEMF(g_sg1_hud_actor + 0x158) = g_sg1_hud_save[1]; MEMF(g_sg1_hud_actor + 0x15C) = g_sg1_hud_save[2]; g_sg1_hud_actor = 0; } }  /* SG1 */
+     POP32(esp, edi);
+     POP32(esp, esi);
+     POP32(esp, ebx);
