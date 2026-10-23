@@ -436,12 +436,18 @@ static void record_tex_reg(uint32_t method, uint32_t param)
  * which is enough to see that texturing works at all and not enough to answer
  * "is a font page ever bound". This is the same shape as the unhandled-method
  * table below it: a small set, ranked, printed with the rest of the report. */
-#define PB_EXEC_MAX_TEXTURES 64
+#define PB_EXEC_MAX_TEXTURES 4096   /* array size; the active limit is 64 unless RECOMP_TEX_DUMP is set (see tex_use_limit) */
 typedef struct {
     uint32_t offset, color, width, height, batches;
 } PbTexUse;
 static PbTexUse s_tex_use[PB_EXEC_MAX_TEXTURES];
 static int s_tex_use_count;
+static int tex_use_limit(void)
+{   /* 64 normally (cheap scan per bind); the whole range only while dumping textures for debugging */
+    static int lim;
+    if (!lim) lim = getenv("RECOMP_TEX_DUMP") ? PB_EXEC_MAX_TEXTURES : 64;
+    return lim;
+}
 
 /* Defined below, next to the sampler it goes through. */
 static void dump_texture_bmp(uint32_t seq);
@@ -450,7 +456,7 @@ static void dump_texture_bmp(uint32_t seq);
  * listing sorts them after the textures they came from and no first-use file
  * is ever overwritten by one. */
 #define TEX_DUMP_SEQ_BASE 1000u
-#define TEX_DUMP_SEQ_MAX  40u
+#define TEX_DUMP_SEQ_MAX  200u
 
 static void note_texture_use(void)
 {
@@ -492,7 +498,7 @@ static void note_texture_use(void)
             return;
         }
     }
-    if (s_tex_use_count < PB_EXEC_MAX_TEXTURES) {
+    if (s_tex_use_count < tex_use_limit()) {
         s_tex_use[s_tex_use_count].offset  = s_gpu.texs[0].offset;
         s_tex_use[s_tex_use_count].color   = s_gpu.texs[0].color;
         s_tex_use[s_tex_use_count].width   = s_gpu.texs[0].width;

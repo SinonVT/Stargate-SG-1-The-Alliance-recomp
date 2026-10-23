@@ -295,7 +295,7 @@ static int mn_key_edge(int vk, int *prev)
 /* Menu pages. Entry codes: 0..2 = front-end items (mouse, invert Y, controllers), 100+k = back-end item k
  * (d3d11_backend.c), 900 = open the debug page, 901 = back to the main page. */
 static int s_mn_page;
-static const int s_mn_main[] = { 0, 1, 2, 114, 113, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
+static const int s_mn_main[] = { 0, 1, 2, 114, 113, 116, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
 static const int s_mn_dbg[]  = { 115, 111, 112, 105, 106, 107, 901 };
 
 static int mn_items(void) { return s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }

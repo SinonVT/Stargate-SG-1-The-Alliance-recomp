@@ -341,6 +341,7 @@ static LONGLONG                g_t_total, g_t_vb, g_t_tex, g_t_call;
 static LONGLONG qpc(void) { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
 static ID3D11RasterizerState  *g_rs;
 static ID3D11ShaderResourceView *g_white;
+static ID3D11ShaderResourceView *g_clear;
 static int                     g_init_failed;
 static unsigned                g_logframe, g_logn, g_dumpn;
 static int                     g_lastrthit;
@@ -461,6 +462,16 @@ static int ensure_init(void)
             ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)t, NULL, &g_white);
             ID3D11Texture2D_Release(t);
         }
+    }
+    {   /* a 1x1 fully transparent texture, used in place of the hidden banner */
+        D3D11_TEXTURE2D_DESC td; D3D11_SUBRESOURCE_DATA sd; ID3D11Texture2D *t = NULL; uint32_t px = 0;
+        memset(&td, 0, sizeof td);
+        td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        sd.pSysMem = &px; sd.SysMemPitch = 4; sd.SysMemSlicePitch = 0;
+        ID3D11Device_CreateTexture2D(g_dev, &td, &sd, &t);
+        if (t) { ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)t, NULL, &g_clear); ID3D11Texture2D_Release(t); }
     }
     logf_("D3D11 back end ready (feature level 0x%X)", (unsigned)fl);
     return 1;
@@ -718,6 +729,8 @@ static int g_dbg_tex, g_dbg_log;         /* debug: dump decoded textures to texd
 static struct { uint32_t off, fmt, w, h, lv, flt, draws, tris; double area; float uvspan; uint32_t t1f, t1w, t1h, t2f, t2w, prog, nst, fin0, fin1, ocw0, icw0, uvs1, tv; } g_ta[96];
 static int g_ta_n;
 extern int g_sg1_hdpack;
+extern int g_sg1_hideph;                      /* Menu: hide the PLACE-HOLDER banner texture */
+extern uint64_t g_sg1_ph_hash[8]; extern int g_sg1_ph_n;
 extern int g_sg1_fov;
 extern int g_sg1_whitepct;
 int g_sg1_cube = 1;   /* Debug menu: sample cube maps (off = neutral white, the old behaviour) */
@@ -741,6 +754,10 @@ static void settings_init(void)
     g_sg1_texmat = sg1_cfg_int("texmat", 1) ? 1 : 0;
     g_sg1_cube = sg1_cfg_int("cubemaps", 1) ? 1 : 0;
     g_sg1_hdpack = sg1_cfg_int("hdpack", 1) ? 1 : 0;
+    g_sg1_hideph = sg1_cfg_int("hideph", 0) ? 1 : 0;
+    if (g_sg1_ph_n == 0) g_sg1_ph_hash[g_sg1_ph_n++] = 0x59355B879916C320ull;   /* the PLACE-HOLDER banner (256x256 DXT5) */
+    { const char *ph = getenv("RECOMP_PH_HASH");   /* hex hashes, comma separated (also baked in below) */
+      while (ph && *ph && g_sg1_ph_n < 8) { char *end; unsigned long long v = strtoull(ph, &end, 16); if (end == ph) break; g_sg1_ph_hash[g_sg1_ph_n++] = v; ph = (*end == ',') ? end + 1 : end; } }
     g_sg1_custom = sg1_cfg_int("customtex", 0) ? 1 : 0;
     g_sg1_fov = sg1_cfg_int("fov", 75);
     g_sg1_whitepct = sg1_cfg_int("whitepct", 10);
@@ -772,6 +789,8 @@ static const GUID sg1_PF_BGRA          = {0x6fddc324,0x4e03,0x4bfe,{0xb1,0x85,0x
 int g_sg1_whitepct = 10;   /* Debug menu: brightness (percent) given to props whose vertex colours are all white */
 int g_sg1_fov = 75;       /* Menu: field of view, sent to the game with the FOV console command */
 int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
+int g_sg1_hideph = 0;     /* Menu: hide the PLACE-HOLDER banner (matched by pixel hash, see [TEX256] in the debug log) */
+uint64_t g_sg1_ph_hash[8]; int g_sg1_ph_n;
 static unsigned g_hd_loaded;
 
 static uint32_t hd_crc_tab[256]; static int hd_crc_init;
@@ -946,6 +965,10 @@ static int tex_upload(Tex *e, const Nv2aTexture *t)
                 }
             }
         }
+    }
+    if (g_dbg_log && t->color == 0x0F && t->width == 256 && t->height == 256) {   /* find the PLACE-HOLDER banner: its address is t_*_<off>_fmt0F.bmp from RECOMP_TEX_DUMP */
+        static unsigned n256;
+        if (n256 < 300) { fprintf(stderr, "[TEX256] off=%08X hash=%016llX\n", t->offset, (unsigned long long)e->hash); fflush(stderr); n256++; }
     }
     if (ok && t->color == 0x0C) {   /* SG1: DXT1 pure black = transparent (window holes in room-interior meshes) */
         static int bk = -1;
@@ -1148,6 +1171,10 @@ static ID3D11ShaderResourceView *tex_srv(const Nv2aTexture *t, uint32_t texel_uv
         }
     }
     e->last_use = g_frame;
+    if (g_sg1_hideph && g_sg1_ph_n && g_clear && e->color == 0x0F && e->w == 256 && e->h == 256) {
+        int k;
+        for (k = 0; k < g_sg1_ph_n; k++) if (g_sg1_ph_hash[k] == e->hash) return g_clear;
+    }
     return e->srv ? e->srv : g_white;
 }
 
@@ -2112,6 +2139,8 @@ static void bm_text(int item, char *b, int n)
         snprintf(b, n, "White prop level    < %d%% >", g_sg1_whitepct);
     else if (item == 14)
         snprintf(b, n, "Field of view       < %d >", g_sg1_fov);
+    else if (item == 16)
+        snprintf(b, n, "Hide PLACE-HOLDER   < %s >", g_sg1_hideph ? "on" : "off");
     else if (item == 13)
         snprintf(b, n, "HD texture pack     < %s >", g_sg1_hdpack ? "on" : "off");
     else if (item == 12) {
@@ -2173,6 +2202,9 @@ static void bm_change(int item, int dir)
         sg1_cfg_set("fov", v);
         snprintf(cmd, sizeof cmd, "FOV %d", sg1_hor_plus(g_sg1_fov));
         mkb_type_command(cmd, 700);   /* typed into the game console once you stop pressing */
+    } else if (item == 16) {
+        g_sg1_hideph = !g_sg1_hideph;
+        sg1_cfg_set("hideph", g_sg1_hideph ? "1" : "0");
     } else if (item == 13) {
         g_sg1_hdpack = !g_sg1_hdpack;
         sg1_cfg_set("hdpack", g_sg1_hdpack ? "1" : "0");
@@ -2367,6 +2399,6 @@ void sg1_gpu_backend_install(void)
     extern int (*xbox_fb_hires_hook)(uint32_t, const uint32_t **, uint32_t *, uint32_t *);
     nv2a_backend_register_ex(&g_backend);
     xbox_fb_hires_hook = sg1_hires_grab;
-    g_sg1_bm_count = 16; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
+    g_sg1_bm_count = 17; g_sg1_bm_text = bm_text; g_sg1_bm_change = bm_change;
     fprintf(stderr, "[GPU11] D3D11 back end registered\n");
 }
