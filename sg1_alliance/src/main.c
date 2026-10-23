@@ -101,6 +101,129 @@ extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
 extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
 extern ptrdiff_t g_xbox_mem_offset;
 
+/* SG1 probe (debug logs only): HUD progress bars (stamina/shield/ammo) are UIProgressBar actors whose Skins[0] is a TexScaler whose UScale is the
+ * fill fraction. The retail renderer never applies that scale, so the bars never move. Find the TexScaler through the actor and log its UScale. */
+static int bp_ok(uint32_t a) { return a >= 0x10000u && a < 0x0FF00000u && !(a & 3); }
+static uint32_t bp_u32(uint32_t a) { return *(volatile uint32_t *)((uintptr_t)a + (uintptr_t)g_xbox_mem_offset); }
+static float bp_f(uint32_t a) { uint32_t u = bp_u32(a); float f; memcpy(&f, &u, 4); return f; }
+static void bp_mesh(uint32_t act) {   /* find the StaticMesh bounding box (FBox min/max + valid flag) of a bar-sized widget */
+    static uint32_t ids[24]; static int nid, lines; int i, o, q;
+    float a, b, c;
+    if (!bp_ok(act) || lines >= 80) return;
+    a = bp_f(act + 0x26C); b = bp_f(act + 0x270); c = bp_f(act + 0x274);
+    if (!(a > 0.079f && a < 0.081f && b > 0.079f && b < 0.081f && c > 0.079f && c < 0.081f)) return;
+    for (i = 0; i < nid; i++) if (ids[i] == act) return;
+    if (nid >= 24) return;
+    ids[nid++] = act;
+    for (o = 0x100; o <= 0x4A0; o += 4) {
+        uint32_t p;
+        if (o == 0x284) continue;
+        p = bp_u32(act + o);
+        if (!bp_ok(p) || p + 0x200 >= 0x0FF00000u) continue;
+        for (q = 0x10; q <= 0x160; q += 4) {
+            float mn[3], mx[3]; int ok = 1, k;
+            if ((bp_u32(p + q + 24) & 0xFFu) != 1u) continue;
+            for (k = 0; k < 3; k++) { mn[k] = bp_f(p + q + 4 * k); mx[k] = bp_f(p + q + 12 + 4 * k); if (!(mn[k] <= mx[k]) || fabsf(mn[k]) > 1000.0f || fabsf(mx[k]) > 1000.0f) ok = 0; }
+            if (!ok || (mx[0] - mn[0]) + (mx[1] - mn[1]) + (mx[2] - mn[2]) < 0.01f) continue;
+            if (lines < 80) { lines++; fprintf(stderr, "[BARMESH] act=%X actor+0x%X obj=%X +0x%X box min(%.3f %.3f %.3f) max(%.3f %.3f %.3f)\n", act, o, p, q, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]); }
+            break;
+        }
+    }
+}
+static void bp_dump(uint32_t act) {   /* every 1.5 s per bar-sized widget: the first 0x140 bytes of Skins[0] as dwords */
+    static uint32_t ids[16]; static DWORD last[16]; static int nid, lines; int i, k;
+    uint32_t p, obj; DWORD now = GetTickCount();
+    float a, b, c;
+    if (!bp_ok(act) || lines >= 450) return;
+    a = bp_f(act + 0x26C); b = bp_f(act + 0x270); c = bp_f(act + 0x274);
+    if (!(a > 0.079f && a < 0.081f && b > 0.079f && b < 0.081f && c > 0.079f && c < 0.081f)) return;
+    p = bp_u32(act + 0x284); if (!bp_ok(p)) return;
+    obj = bp_u32(p); if (!bp_ok(obj) || obj + 0x200 >= 0x0FF00000u) return;
+    for (i = 0; i < nid; i++) if (ids[i] == act) break;
+    if (i == nid) { if (nid >= 16) return; ids[nid++] = act; last[i] = 0; }
+    if (now - last[i] < 1500u) return;
+    last[i] = now; lines++;
+    fprintf(stderr, "[BARDUMP] t=%lu act=%X obj=%X:", (unsigned long)now, act, obj);
+    for (k = 0; k < 0x140; k += 4) fprintf(stderr, " %X", bp_u32(obj + k));
+    fprintf(stderr, "\n");
+}
+void sg1_bar_probe(uint32_t act) {
+    static int n; static uint32_t seen[64]; static int nseen; static unsigned calls, chains, near_n, shown;
+    int o, q, found = 0, soff = -1, qoff = -1; float f = -1.0f; int i;
+    if (!sg1_dbg_logs() || !g_xbox_mem_offset) return;
+    calls++;
+    if (calls == 1 || calls == 300 || calls == 3000 || calls == 30000) fprintf(stderr, "[BARPROBE] calls=%u act=%08X ok=%d chains=%u nearmatches=%u found_logged=%d\n", calls, act, bp_ok(act), chains, near_n, n);
+    if (!bp_ok(act) || n >= 300) return;
+    for (o = 0x100; o <= 0x700 && !found; o += 4) {
+        uint32_t p = bp_u32(act + o), obj;
+        if (!bp_ok(p)) continue;
+        obj = bp_u32(p);
+        if (!bp_ok(obj) || obj + 0x200 >= 0x0FF00000u) continue;
+        chains++;
+        for (q = 0x20; q <= 0x1A0; q += 4) {
+            float f0 = bp_f(obj + q), f1 = bp_f(obj + q + 4), f2 = bp_f(obj + q + 8), f3 = bp_f(obj + q + 12);
+            if (f1 == 1.0f && f2 == 0.0f && f3 == 0.0f && f0 > 0.0f && f0 < 1.0f) {
+                near_n++;
+                if (shown < 12) { shown++; fprintf(stderr, "[BARPROBE] near act=%05X +0x%X -> obj %05X +0x%X: f0=%.4f\n", act, o, obj, q, f0); }
+            }
+            if (f0 >= 0.0f && f0 <= 1.0f && f1 == 1.0f && f2 == 0.0f && f3 == 0.0f && (q >= 0x40)) { soff = o; qoff = q; f = f0; found = 1; break; }
+        }
+    }
+    if (!found) return;
+    {   /* log when the widget is new or its fraction changed by > 1% */
+        uint32_t key = (act & 0xFFFFFF) ^ ((uint32_t)(int)(f * 100.0f) << 24);
+        for (i = 0; i < nseen; i++) if (seen[i] == key) return;
+        if (nseen < 64) seen[nseen++] = key;
+        {   int d3 = -1; for (o = 0x100; o <= 0x300; o += 4) { float a = bp_f(act + o), b = bp_f(act + o + 4), c = bp_f(act + o + 8); if (a > 0.04f && a < 0.2f && fabsf(a - b) < 1e-4f && fabsf(a - c) < 1e-4f) { d3 = o; break; } }
+            n++; fprintf(stderr, "[BARPROBE] act=%05X skins@+0x%X uscale@+0x%X f=%.3f drawscale3d@+%d (%.3f %.3f %.3f)\n", act, soff, qoff, f, d3, d3 >= 0 ? bp_f(act + d3) : 0.0f, d3 >= 0 ? bp_f(act + d3 + 4) : 0.0f, d3 >= 0 ? bp_f(act + d3 + 8) : 0.0f); }
+    }
+}
+
+/* HUD progress bars (stamina, shield/health, ammo): UIProgressBar actors whose Skins[0] is a runtime TexScaler (vtable 0x0050FEF0) whose UScale (+0x8C) is the
+ * fill fraction. The retail renderer never applies that scale, so the bars never move. With "Fix HUD bars" on, the DrawActor hook calls sg1_bar_apply() just
+ * before a HUD widget is drawn: the widget's DrawScale3D.Y (+0x270, the width) is multiplied by the fill, and sg1_bar_restore() puts it back afterwards. */
+extern int sg1_barfix_on(void);
+static uint32_t g_bar_act; static float g_bar_y, g_bar_f, g_bar_L; static float g_bar_loc[3]; static int g_bar_shifted;
+void sg1_bar_apply(uint32_t act) {
+    uint32_t p, obj; float f, ys;
+    g_bar_act = 0;
+    if (!g_xbox_mem_offset || !bp_ok(act) || !sg1_barfix_on()) return;
+    p = bp_u32(act + 0x284); if (!bp_ok(p)) return;
+    obj = bp_u32(p); if (!bp_ok(obj) || obj + 0x200 >= 0x0FF00000u) return;
+    if (bp_u32(obj) != 0x0050FEF0u) return;                        /* not a TexScaler */
+    { static uint32_t seen2[32]; static int ns2; int k, dup = 0; for (k = 0; k < ns2; k++) if (seen2[k] == act) dup = 1;
+      if (!dup && ns2 < 32 && sg1_dbg_logs()) { seen2[ns2++] = act; fprintf(stderr, "[BARID] act=%05X ys=%.4f xs=%.4f zs=%.4f f=%.3f dw:", act, bp_f(act+0x270), bp_f(act+0x26C), bp_f(act+0x274), bp_f(obj+0x8C));
+        for (k = 0; k < 20; k++) fprintf(stderr, " %X", bp_u32(act + 4*k)); fprintf(stderr, "\n"); } }
+    f = bp_f(obj + 0x8C);
+    if (!(f >= 0.0f && f < 0.999f) || bp_f(obj + 0x90) != 1.0f) return;   /* full (or not a bar): leave it alone */
+    ys = bp_f(act + 0x270);
+    if (!(ys > 0.005f && ys < 1.0f)) return;
+    if (f < 0.001f) f = 0.001f;   /* empty = nothing visible (a zero scale is avoided) */
+    g_bar_act = act; g_bar_y = ys; g_bar_f = f; g_bar_shifted = 0;
+    switch (bp_u32(act + 0x40) & 0xFFF) {   /* which bar: identified by a per-widget field; L = left end of its mesh along the width axis */
+        case 0xDC0: g_bar_L = -21.638f; break;  /* shield  */
+        case 0xC00: g_bar_L = 2.888f; break;    /* stamina */
+        case 0xA40: g_bar_L = -6.027f; break;   /* ammo: anchored at its RIGHT end (empties left to right, as on the Xbox) */
+        case 0x880: g_bar_L = -6.496f; break;   /* extra ammo: anchored at its RIGHT end (fills right to left) */
+        default: g_bar_L = 0.0f; break;
+    }
+    { float v = ys * f; *(volatile float *)((uintptr_t)(act + 0x270) + (uintptr_t)g_xbox_mem_offset) = v; }
+}
+void sg1_bar_shift(uint32_t act) {   /* keep the bar's left end where it was: move the widget along its width axis */
+    float pi, yw, ro, SP, CP, SY, CY, SR, CR, d, Y[3]; int i;
+    if (!g_bar_act || act != g_bar_act || g_bar_L == 0.0f) return;
+    pi = (float)(int32_t)bp_u32(act + 0x160) * 9.5873799e-5f; yw = (float)(int32_t)bp_u32(act + 0x164) * 9.5873799e-5f; ro = (float)(int32_t)bp_u32(act + 0x168) * 9.5873799e-5f;
+    SP = sinf(pi); CP = cosf(pi); SY = sinf(yw); CY = cosf(yw); SR = sinf(ro); CR = cosf(ro);
+    Y[0] = SR * SP * CY - CR * SY; Y[1] = SR * SP * SY + CR * CY; Y[2] = -SR * CP;
+    d = g_bar_L * (1.0f - g_bar_f) * g_bar_y;
+    for (i = 0; i < 3; i++) { float *pl = (float *)((uintptr_t)(act + 0x154 + 4 * i) + (uintptr_t)g_xbox_mem_offset); g_bar_loc[i] = *pl; *pl += Y[i] * d; }
+    g_bar_shifted = 1;
+}
+void sg1_bar_restore(void) {
+    if (g_bar_act && g_bar_shifted) { int i; for (i = 0; i < 3; i++) *(float *)((uintptr_t)(g_bar_act + 0x154 + 4 * i) + (uintptr_t)g_xbox_mem_offset) = g_bar_loc[i]; g_bar_shifted = 0; }
+    if (g_bar_act) { *(volatile float *)((uintptr_t)(g_bar_act + 0x270) + (uintptr_t)g_xbox_mem_offset) = g_bar_y; g_bar_act = 0; }
+}
+
 /* ── XBE Constants ─────────────────────────────────────────── */
 
 /*

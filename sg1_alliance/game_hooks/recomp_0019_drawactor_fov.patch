@@ -1,6 +1,6 @@
 --- a/recomp_0019.c
 +++ b/recomp_0019.c
-@@ -7586,6 +7586,72 @@
+@@ -7586,6 +7586,74 @@
      }
  
  loc_001022E4: ;
@@ -13,6 +13,7 @@
 +      extern int g_sg1_mode_w, g_sg1_mode_h, g_sg1_cam_off; extern uint32_t g_sg1_hud_actor; extern float g_sg1_hud_save[3];
 +      extern int sg1_hud_scale_pct(void); extern void sg1_hud_anchor(uint32_t id, float x, float y, float ax); extern float sg1_hud_pivot(uint32_t id, float xf, float yf); extern void sg1_hud_log(int off, float f, float r, float u); extern void sg1_hud_dbg(int tag, float a, float b, float c, float d); extern int sg1_dbg_logs(void);
 +      g_sg1_hud_actor = 0;
++      { extern void sg1_bar_apply(uint32_t); extern void sg1_bar_probe(uint32_t); uint32_t _pa = MEM32(esp + 0x18); float _pf = MEMF(esp + 0xC); if (_pa && MEM8(esp + 0x20) && _pf > 89.0f && _pf < 91.0f) { sg1_bar_probe(_pa); sg1_bar_apply(_pa); } }   /* SG1: HUD progress bars */
 +      if (g_sg1_mode_w > 0 && g_sg1_mode_h > 0) {
 +        float _a = (float)g_sg1_mode_w / (float)g_sg1_mode_h, _f = MEMF(esp + 0xC);
 +        uint32_t _act = MEM32(esp + 0x18);
@@ -70,13 +71,15 @@
 +        }
 +      }
 +    }
++    { extern void sg1_bar_shift(uint32_t); sg1_bar_shift(MEM32(esp + 0x18)); }  /* SG1: HUD bar left-edge anchor */
      edx = MEM32(esp + 0x20);
      eax = MEM32(esp + 0xC);
      ecx = MEM32(esp + 0x10);
-@@ -7600,6 +7666,7 @@
+@@ -7600,6 +7668,8 @@
      PUSH32(esp, 0x00102304u); RECOMP_ABI_CALL(0x00101EA0u, sub_00101EA0); /* call 0x00101EA0 */
  
  loc_00102304: ;
++    { extern void sg1_bar_restore(void); sg1_bar_restore(); }  /* SG1 */
 +    { extern uint32_t g_sg1_hud_actor; extern float g_sg1_hud_save[3]; if (g_sg1_hud_actor) { MEMF(g_sg1_hud_actor + 0x154) = g_sg1_hud_save[0]; MEMF(g_sg1_hud_actor + 0x158) = g_sg1_hud_save[1]; MEMF(g_sg1_hud_actor + 0x15C) = g_sg1_hud_save[2]; g_sg1_hud_actor = 0; } }  /* SG1 */
      POP32(esp, edi);
      POP32(esp, esi);

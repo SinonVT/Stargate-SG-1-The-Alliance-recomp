@@ -63,6 +63,10 @@ try:   # script fixes: non-team chat, Last Man Standing menu entry, and the miss
     run('Applying the game script fixes (teamsay, Last Man Standing, Replicator.ini)', [py, os.path.join(here, 'tools', 'patches', 'sg1patch.py'), os.path.dirname(xbe)], cwd=here)
 except SystemExit:
     print('(some script fixes were not applied; run tools\\patches\\sg1patch.py by hand, it says which)')
+try:   # the health/shield bar never moves in story mode in the retail script (same on the Xbox); keeps a .orig_hb backup, patch_health_bar.py --revert undoes it
+    run('Making the health bar work in story mode (StargateGame.u)', [py, os.path.join(here, 'tools', 'patch_health_bar.py'), os.path.dirname(xbe)], cwd=here)
+except SystemExit:
+    print('(health bar fix not applied; run tools\\patch_health_bar.py by hand)')
 if '--build' in flags:
     if not shutil.which('cmake'):
         print('cmake not found: open a "x64 Native Tools Command Prompt for VS 2022" and run this script again, or build by hand (below).')

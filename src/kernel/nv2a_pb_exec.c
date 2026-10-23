@@ -380,6 +380,7 @@ static float reg_f(uint32_t method)
 static uint32_t s_sem_va;
 static uint32_t s_dbg_nop, s_dbg_nop_n, s_dbg_inc_n;
 static int s_prof = -1;
+extern int sg1_dbg_logs(void);   /* RECOMP_DEBUG_LOGS=1: gates the [TEXMAT]/[BARDIR] probes */
 static int prof_on(void) { if (s_prof < 0) s_prof = getenv("RECOMP_PROF") != NULL; return s_prof; }
 volatile uint64_t g_sg1_gap_ns, g_sg1_kicks;   /* time between pushbuffer kicks (the game producing) and kick count */
 volatile LONG64 g_rt_busy_ns, g_rt_wait_ns;   /* render thread: time replaying / executor: time held back by it */
@@ -2427,7 +2428,27 @@ static void ffp_texgen(uint32_t index, const float in[4], Nv2aVshOutput *out)
                     m[k] = reg_f(0x0840 + 0x40 * st + 4 * k);
                     if (m[k] != ((k % 5) == 0 ? 1.0f : 0.0f)) ident = 0;
                 }
+                {   /* SG1 probe 2: how often is a texture matrix enabled at all, and is it identity */
+                    static int t2 = -1;
+                    static unsigned en, nid, shown;
+                    if (t2 < 0) t2 = sg1_dbg_logs();
+                    if (t2) {
+                        en++; if (!ident) nid++;
+                        if ((en & 0xFFFFF) == 1 && shown < 30) { shown++; fprintf(stderr, "[TEXMAT2] enabled=%u nonident=%u st%d m0=%.3f m5=%.3f m3=%.3f m7=%.3f m12=%.3f m13=%.3f\n", en, nid, st, m[0], m[5], m[3], m[7], m[12], m[13]); }
+                    }
+                }
                 if (!ident) {
+                    {   /* SG1 probe: RECOMP_DEBUG_LOGS=1 logs texture matrices that only shrink U (a TexScaler bar: stamina/shield/ammo) */
+                        static int tml = -1;
+                        static unsigned tmn;
+                        static float last[4];
+                        if (tml < 0) tml = sg1_dbg_logs();
+                        if (tml && tmn < 300 && (fabsf(m[0] - 1.0f) > 1e-4f || fabsf(m[5] - 1.0f) > 1e-4f) && fabsf(m[0] - last[st]) > 1e-4f) {
+                            last[st] = m[0];
+                            tmn++;
+                            fprintf(stderr, "[TEXMAT] st%d Uscale %.4f Vscale %.4f off(%.4f %.4f) tex0 %ux%u fmt %02X\n", st, m[0], m[5], m[3], m[7], s_gpu.texs[0].width, s_gpu.texs[0].height, s_gpu.texs[0].color);
+                        }
+                    }
                     for (k = 0; k < 4; k++) v4[k] = out->tex[st][k];
                     if (v4[3] == 0.0f) v4[3] = 1.0f;
                     for (k = 0; k < 4; k++)
@@ -2762,6 +2783,26 @@ static void bex_flush_inner(void)
     memcpy(&b.rc, &s_gpu.rc, sizeof b.rc);
     nv2a_rc_unpack(s_gpu.fog_color, b.fog_color);
     { float r = b.fog_color[2]; b.fog_color[2] = b.fog_color[0]; b.fog_color[0] = r; }
+    {   /* SG1 probe: RECOMP_DEBUG_LOGS=1: small HUD-atlas batches (256x256 fmt 06): screen bbox, UV range and which way U runs (x at the lowest / highest U) */
+        static int bl = -1;
+        static unsigned long seen[160]; static int nseen;
+        if (bl < 0) bl = sg1_dbg_logs();
+        if (bl && nseen < 160 && s_bxn >= 4 && s_bxn <= 400 && s_gpu.texs[0].valid && s_gpu.texs[0].color == 0x06 && s_gpu.texs[0].width == 256 && s_gpu.texs[0].height == 256) {
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, u0 = 1e30f, u1 = -1e30f, xu0 = 0, xu1 = 0, yu0 = 0, yu1 = 0; uint32_t i2; int j2; unsigned long key;
+            for (i2 = 0; i2 < s_bxn; i2++) {
+                float px = s_bxv[i2].pos[0], py = s_bxv[i2].pos[1], tu = s_bxv[i2].tex[0][0];
+                if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+                if (tu < u0) { u0 = tu; xu0 = px; yu0 = py; } if (tu > u1) { u1 = tu; xu1 = px; yu1 = py; }
+            }
+            key = (unsigned long)s_bxn * 7u + (unsigned long)(int)(x0 / 2.0f) * 131u + (unsigned long)(int)(y0 / 2.0f) * 17u + (unsigned long)(int)(x1 / 2.0f) * 5u;
+            for (j2 = 0; j2 < nseen; j2++) if (seen[j2] == key) break;
+            if (j2 == nseen) {
+                seen[nseen++] = key;
+                fprintf(stderr, "[BARDIR] n=%u screen x %.1f..%.1f y %.1f..%.1f  u %.3f at (x %.1f,y %.1f) .. u %.3f at (x %.1f,y %.1f)  -> U runs %s\n",
+                        s_bxn, x0, x1, y0, y1, u0, xu0, yu0, u1, xu1, yu1, (xu1 - xu0) > 1.0f ? "LEFT-to-RIGHT" : (xu0 - xu1) > 1.0f ? "RIGHT-to-LEFT" : "vertical/none");
+            }
+        }
+    }
     {   /* SG1: where does the diffuse of a HUD icon quad come from? */
         static unsigned nb, nw;
         const Texture *t0 = &s_gpu.texs[0];
@@ -4729,6 +4770,21 @@ static void nv2a_pb_exec_method_inner(uint32_t subch, uint32_t method, uint32_t 
     }
     if (subch == 0)                        /* the 3D class's register file */
         s_reg[(method & 0x1FFCu) / 4] = param;
+    {   /* SG1 probe 3: RECOMP_DEBUG_LOGS=1: texture-matrix register writes (0x0840 + 0x40*stage, 16 floats) */
+        static int t3 = -1;
+        static unsigned nw, nshow;
+        if (t3 < 0) t3 = sg1_dbg_logs();
+        if (t3 && subch == 0 && method >= 0x0840u && method < 0x0940u) {
+            uint32_t rel = method - 0x0840u, el = (rel & 0x3Fu) / 4;
+            float f; memcpy(&f, &param, 4);
+            nw++;
+            if ((el == 0 || el == 5) && f != 1.0f && f != 0.0f && nshow < 200) {
+                nshow++;
+                fprintf(stderr, "[TEXMAT3] st%u el%u = %.4f (write #%u)\n", rel / 0x40u, el, f, nw);
+            }
+            if ((nw & 0xFFFFu) == 1) fprintf(stderr, "[TEXMAT3] total matrix register writes so far: %u\n", nw);
+        }
+    }
     /* Bring-up: the first parameters each surface method carries. A wrong
      * pitch or clip is indistinguishable from a method never arriving unless
      * the values are visible. Cached: this runs for every method, and an

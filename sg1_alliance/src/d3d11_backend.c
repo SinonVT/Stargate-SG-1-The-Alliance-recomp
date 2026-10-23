@@ -800,6 +800,7 @@ int g_sg1_hudscale = 100; /* Menu: HUD size in percent (the DrawActor hook in re
 int g_sg1_xhair = 100;  /* Menu: crosshair size in percent (small 2D quads near the screen centre are scaled about their own centre in be_draw) */
 int sg1_dbg_logs(void) { settings_init(); return g_dbg_log; }   /* RECOMP_DEBUG_LOGS=1 or the Debug menu: gates the HUD logs in main.c / the DrawActor hook */
 int sg1_hud_scale_pct(void) { settings_init(); return g_sg1_hudscale; }
+int sg1_barfix_on(void) { return 1; }   /* HUD progress bars always follow their fill (the retail renderer never applied the TexScaler; see main.c sg1_bar_apply) */
 int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
 int g_sg1_hideph = 0;     /* Menu: hide the PLACE-HOLDER banner (matched by pixel hash, see [TEX256] in the debug log) */
 uint64_t g_sg1_ph_hash[8]; int g_sg1_ph_n;
