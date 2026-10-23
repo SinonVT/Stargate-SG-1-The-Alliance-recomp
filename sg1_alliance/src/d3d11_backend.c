@@ -798,6 +798,7 @@ int g_sg1_whitepct = 10;   /* Debug menu: brightness (percent) given to props wh
 int g_sg1_fov = 75;       /* Menu: field of view, sent to the game with the FOV console command */
 int g_sg1_hudscale = 100; /* Menu: HUD size in percent (the DrawActor hook in recomp_0019.c scales the HUD widgets) */
 int g_sg1_xhair = 100;  /* Menu: crosshair size in percent (small 2D quads near the screen centre are scaled about their own centre in be_draw) */
+int sg1_dbg_logs(void) { settings_init(); return g_dbg_log; }   /* RECOMP_DEBUG_LOGS=1 or the Debug menu: gates the HUD logs in main.c / the DrawActor hook */
 int sg1_hud_scale_pct(void) { settings_init(); return g_sg1_hudscale; }
 int g_sg1_hdpack = 1;     /* Menu: load replacement PNGs */
 int g_sg1_hideph = 0;     /* Menu: hide the PLACE-HOLDER banner (matched by pixel hash, see [TEX256] in the debug log) */
