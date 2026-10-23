@@ -298,7 +298,9 @@ static int mn_key_edge(int vk, int *prev)
 /* Menu pages. Entry codes: 0..2 = front-end items (mouse, invert Y, controllers), 100+k = back-end item k
  * (d3d11_backend.c), 900 = open the debug page, 901 = back to the main page. */
 static int s_mn_page;
-static const int s_mn_main[] = { 0, 1, 2, 114, 117, 118, 113, 116, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
+static const int s_mn_main[] = { 0, 1, 2, 114, 902, 903, 900 };
+static const int s_mn_hud[]  = { 117, 118, 901 };   /* page 3: HUD options */
+static const int s_mn_gfx[]  = { 3, 100, 101, 102, 103, 113, 116, 104, 108, 109, 110, 901 };   /* page 4: graphics */
 static const int s_mn_dbg[]  = { 115, 111, 112, 105, 106, 107, 901 };
 
 /* Page 2: secret NPC spawner (Del). Types console commands into the game: summon StargateContent.<name>.
@@ -374,18 +376,26 @@ static void mn_spawn_npc(int row)      /* row 0 = the AI switch, rows 1.. = NPCs
         mn_chain_add(s_chain_buf[0]);
     } else mn_chain_add(s_chain_buf[0]);
 }
-static int mn_items(void) { return s_mn_page == 2 ? NPC_COUNT + 1 : s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
-static int mn_code(int i) { return s_mn_page == 2 ? 1000 + i : s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
+/* Game resolution: types SETRES WxH into the game console (needs the HD display modes). */
+extern int g_sg1_mode_w, g_sg1_mode_h;
+static const struct { int w, h; } s_gres[3] = { { 1920, 1080 }, { 1280, 720 }, { 640, 480 } };
+static int s_gres_sel = -1;
+static void gres_init(void) { if (s_gres_sel < 0) { int i; s_gres_sel = 1; for (i = 0; i < 3; i++) if (g_sg1_mode_w == s_gres[i].w && g_sg1_mode_h == s_gres[i].h) s_gres_sel = i; } }
+static int mn_items(void) { return s_mn_page == 4 ? (int)(sizeof s_mn_gfx / sizeof *s_mn_gfx) : s_mn_page == 3 ? (int)(sizeof s_mn_hud / sizeof *s_mn_hud) : s_mn_page == 2 ? NPC_COUNT + 1 : s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
+static int mn_code(int i) { return s_mn_page == 4 ? s_mn_gfx[i] : s_mn_page == 3 ? s_mn_hud[i] : s_mn_page == 2 ? 1000 + i : s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
 
 static void mn_text(int i, char *b, int n)
 {
     int c = mn_code(i);
     b[0] = 0;
     if (c >= 1000) { if (c == 1000) snprintf(b, n, "AI (bStartup)  < %s >   Right = toggle", s_ai_on ? "ON" : "off"); else if (c - 1001 < NPC_COUNT) snprintf(b, n, "%s%s", s_npc_def[c - 1001].name, s_npc_def[c - 1001].ctrl ? "" : "  (no AI)"); return; }
-    if (c == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
+    if (c == 3) { gres_init(); snprintf(b, n, "Game res (EXPERIMENTAL) < %dx%d >", s_gres[s_gres_sel].w, s_gres[s_gres_sel].h); }
+    else if (c == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
     else if (c == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
     else if (c == 2) snprintf(b, n, "Game controllers    < %s >", sg1_controllers_on() ? "on" : "off");
     else if (c == 900) snprintf(b, n, "Debug menu          >");
+    else if (c == 902) snprintf(b, n, "HUD options         >");
+    else if (c == 903) snprintf(b, n, "Graphics            >");
     else if (c == 901) snprintf(b, n, "<  Back");
     else if (c >= 100 && c < 200 && g_sg1_bm_text && c - 100 < g_sg1_bm_count) g_sg1_bm_text(c - 100, b, n);
 }
@@ -393,10 +403,13 @@ static void mn_text(int i, char *b, int n)
 static void mn_change(int i, int dir)
 {
     int c = mn_code(i);
-    if (c == 0) mkb_scale_mul(dir > 0 ? 1.25f : 1.0f / 1.25f);
+    if (c == 3) { char cmd[32]; gres_init(); s_gres_sel = (s_gres_sel + (dir > 0 ? 1 : 2)) % 3; snprintf(cmd, sizeof cmd, "SETRES %dx%d", s_gres[s_gres_sel].w, s_gres[s_gres_sel].h); mkb_type_command(cmd, 700); }   /* typed into the console once you stop pressing */
+    else if (c == 0) mkb_scale_mul(dir > 0 ? 1.25f : 1.0f / 1.25f);
     else if (c == 1) mkb_invert_y_toggle();
     else if (c == 2) sg1_controllers_toggle();
     else if (c == 900) { if (dir > 0) { s_mn_page = 1; s_mn_sel = 0; } }
+    else if (c == 902) { if (dir > 0) { s_mn_page = 3; s_mn_sel = 0; } }
+    else if (c == 903) { if (dir > 0) { s_mn_page = 4; s_mn_sel = 0; } }
     else if (c == 901) { s_mn_page = 0; s_mn_sel = 0; }
     else if (c >= 100 && c < 200 && g_sg1_bm_change && c - 100 < g_sg1_bm_count) g_sg1_bm_change(c - 100, dir);
 }
@@ -466,7 +479,7 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
         if (s_mn_sel >= n) s_mn_sel = 0;
         {
             int fpx = (int)h / 28; if (fpx < 14) fpx = 14; if (fpx > 40) fpx = 40;
-            int pw = fpx * (s_mn_page == 1 ? 40 : s_mn_page == 2 ? 34 : 22), x0 = fpx, y0 = fpx, x, y;
+            int pw = fpx * (s_mn_page == 1 ? 40 : s_mn_page == 2 ? 34 : s_mn_page == 3 ? 30 : s_mn_page == 4 ? 40 : 22), x0 = fpx, y0 = fpx, x, y;
             static int s_top;
             int rows = n, ph;
             { int vis = ((int)h - 2 * y0) / fpx - 4; if (vis < 4) vis = 4; if (rows > vis) rows = vis; }   /* long lists scroll instead of running off the screen */
@@ -492,7 +505,7 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
             old = (HFONT)SelectObject(dc, fnt);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(255, 255, 255));
-            { const char *tt = s_mn_page == 2 ? "NPC SPAWNER  (Right = spawn, Del/Esc closes)" : s_mn_page ? "DEBUG  (Esc = back, Insert closes)" : "SETTINGS  (Insert closes)"; TextOutA(dc, fpx / 2, fpx / 3, tt, (int)strlen(tt)); }
+            { const char *tt = s_mn_page == 2 ? "NPC SPAWNER  (Right = spawn, Del/Esc closes)" : s_mn_page == 4 ? "GRAPHICS  (Esc = back, Insert closes)" : s_mn_page == 3 ? "HUD  (Esc = back, Insert closes)" : s_mn_page ? "DEBUG  (Esc = back, Insert closes)" : "SETTINGS  (Insert closes)"; TextOutA(dc, fpx / 2, fpx / 3, tt, (int)strlen(tt)); }
             for (r = s_top; r < s_top + rows; r++) {
                 char line[96];
                 int ty = fpx * (r - s_top + 2);
@@ -506,7 +519,7 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
                 TextOutA(dc, fpx / 2, ty, line, (int)strlen(line));
             }
             SetTextColor(dc, RGB(150, 150, 150));
-            { char hl[96]; if (s_mn_page == 2) snprintf(hl, sizeof hl, "Row 1 = AI switch. Shift = redo setup (%d/%d)", s_mn_sel + 1, n); else if (rows < n) snprintf(hl, sizeof hl, "Up/Down select  (%d/%d)", s_mn_sel + 1, n); else snprintf(hl, sizeof hl, "Up/Down select  Left/Right change"); TextOutA(dc, fpx / 2, fpx * (rows + 2) + fpx / 3, hl, (int)strlen(hl)); }
+            { char hl[96]; if (mn_code(s_mn_sel) == 3) snprintf(hl, sizeof hl, "Without the HD .bat, changing this will crash you!"); else if (s_mn_page == 2) snprintf(hl, sizeof hl, "Row 1 = AI switch. Shift = redo setup (%d/%d)", s_mn_sel + 1, n); else if (rows < n) snprintf(hl, sizeof hl, "Up/Down select  (%d/%d)", s_mn_sel + 1, n); else snprintf(hl, sizeof hl, "Up/Down select  Left/Right change"); TextOutA(dc, fpx / 2, fpx * (rows + 2) + fpx / 3, hl, (int)strlen(hl)); }
             SelectObject(dc, old); DeleteObject(fnt);
             GdiFlush();
             dib = (uint32_t *)bits;
