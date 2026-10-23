@@ -272,7 +272,10 @@ static void mkb_handle_raw(HRAWINPUT h)
             InterlockedAnd(&s_mouse_btn, ~16);
         if (m->usButtonFlags & RI_MOUSE_WHEEL) {
             SHORT d = (SHORT)m->usButtonData;
-            InterlockedAdd(&s_wheel, d / WHEEL_DELTA);
+            int wn = d / WHEEL_DELTA, wi, wc = wn < 0 ? -wn : wn; unsigned wvk = wn > 0 ? 0xED : 0xEC;   /* IK_MouseWheelUp / Down */
+            InterlockedAdd(&s_wheel, wn);
+            if (wc > 4) wc = 4;
+            for (wi = 0; wi < wc; wi++) { kq_push(wvk, 1, 0, 0); kq_push(wvk, 0, 0, 0); }   /* the game's MouseWheelUp/Down bindings (weapon select) */
         }
     } else if (ri->header.dwType == RIM_TYPEKEYBOARD) {
         const RAWKEYBOARD *k = &ri->data.keyboard;
