@@ -59,10 +59,10 @@ try:   # plain stargates ignore their second trigger in the retail scripts, so t
     run('Fixing the stargate that never closes (StargateContent.u)', [py, os.path.join(here, 'tools', 'patch_gate_close.py'), os.path.join(os.path.dirname(xbe), 'System', 'StargateContent.u')], cwd=here)
 except SystemExit:
     print('(gate fix not applied; run tools\\patch_gate_close.py by hand)')
-try:   # the game has no tweak file for the Replicator classes; the developer NPC spawner needs one (new file only, never overwrites)
-    run('Adding the missing Replicator tweak file (Replicator.ini)', [py, os.path.join(here, 'tools', 'patches', 'sg1patch.py'), os.path.dirname(xbe), '--only', 'replicator-tweak-ini'], cwd=here)
+try:   # script fixes: non-team chat, Last Man Standing menu entry, and the missing Replicator.ini (each keeps a .orig_sg1 backup; run sg1patch.py --revert to undo)
+    run('Applying the game script fixes (teamsay, Last Man Standing, Replicator.ini)', [py, os.path.join(here, 'tools', 'patches', 'sg1patch.py'), os.path.dirname(xbe)], cwd=here)
 except SystemExit:
-    print('(Replicator.ini not added; run tools\\patches\\sg1patch.py by hand)')
+    print('(some script fixes were not applied; run tools\\patches\\sg1patch.py by hand, it says which)')
 if '--build' in flags:
     if not shutil.which('cmake'):
         print('cmake not found: open a "x64 Native Tools Command Prompt for VS 2022" and run this script again, or build by hand (below).')
@@ -76,4 +76,4 @@ To build, in a "x64 Native Tools Command Prompt for VS 2022":
     cmake -S . -B build -DXBOXRECOMP_DIR=..
     cmake --build build --config Release'''))
 print('''Then run  sg1_alliance\\build\\Release\\dbglaunch.exe sg1_alliance_recomp.exe  (it finds default.xbe in its own or a parent folder; or set RECOMP_GAME_DIR).
-Optional next steps: HD pack (tools\\make_hdpack.py) and the script fix (tools\\patches\\sg1patch.py) - see README.''')
+Optional next steps: HD pack (tools\\make_hdpack.py) - see README.''')
