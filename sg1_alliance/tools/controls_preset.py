@@ -3,7 +3,9 @@
 The dump's default layout is the PC prototype layout (Ctrl=Jump, Alt=Fire, Z=Strafe, Q=WeaponZoom, B unbound...). This sets:
 
     B = ToggleBehindView (third person)     Ctrl = Duck        CapsLock = toggleInvisibility
-    Z = ZoomToggle                          Alt, Backspace, Q = unbound (Alt releases the mouse pointer)
+    Z = ZoomToggle                          Alt, Backspace = unbound (Alt releases the mouse pointer)
+    Q = ConcentrateFire (team command: hold, look at a squad mate or an enemy, release)    E = OrderTakeCover (team command)
+    Tab = unbound (the dump binds it to 'Type', which opened the console; the mission info screen still comes from Tab through the pad layer)
     W/A/S/D walking strength: the Xbox bindings (Speed=+-1200, scaled by frame time) give a tiny acceleration for keys, so
     walking felt stuck; all four directions use Speed=+-30000 (equal strength, so diagonals like W+A work).
 
@@ -15,7 +17,7 @@ import os, shutil, sys
 a = [x for x in sys.argv[1:]]
 if not a or a[0].startswith('--'): print(__doc__); sys.exit(1)
 sysdir = os.path.join(a[0].strip('"'), 'System'); revert = '--revert' in a
-KEYS = [('Ctrl', 'Duck'), ('Alt', ''), ('CapsLock', 'toggleInvisibility'), ('Z', 'ZoomToggle'), ('Backspace', ''), ('B', 'ToggleBehindView'), ('Q', '')]
+KEYS = [('Ctrl', 'Duck'), ('Alt', ''), ('CapsLock', 'toggleInvisibility'), ('Z', 'ZoomToggle'), ('Backspace', ''), ('B', 'ToggleBehindView'), ('Q', 'ConcentrateFire'), ('E', 'OrderTakeCover'), ('Tab', '')]
 ALIASES = {'MoveForward': 'Axis aBaseY Speed=+30000.0', 'MoveBackward': 'Axis aBaseY Speed=-30000.0',
            'StrafeLeft': 'Axis aStrafe Speed=-30000.0', 'StrafeRight': 'Axis aStrafe Speed=+30000.0'}
 import re
