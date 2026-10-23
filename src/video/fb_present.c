@@ -163,6 +163,9 @@ void xbox_FramebufferWindowSetAA(uint32_t sy)
     s_fb_aa_sy = sy ? sy : 1;
 }
 
+/* Set while the NPC spawner types its console commands: keep presenting so the game is not frozen and the typing is visible. */
+volatile int g_sg1_show_typing;
+
 /* Called by the pushbuffer executor when the title flips. */
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
@@ -171,7 +174,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     uint32_t bpp, x, y;
 
     {   extern int mkb_name_busy(void);
-        if (mkb_name_busy()) return;       /* hide the console while the name is typed */
+        if (mkb_name_busy() && !g_sg1_show_typing) return;       /* hide the console while the name is typed */
     }
     if (!s_fb_running || !fb_va || !pitch)
         return;
@@ -298,15 +301,21 @@ static int s_mn_page;
 static const int s_mn_main[] = { 0, 1, 2, 114, 113, 116, 100, 101, 102, 103, 104, 108, 109, 110, 900 };
 static const int s_mn_dbg[]  = { 115, 111, 112, 105, 106, 107, 901 };
 
-/* Page 2: secret NPC spawner (Del). Types "summon StargateContent.<name>" into the game console. */
-static const char *const s_npc[] = {
-    "JaffaHorusL", "JaffaHorusM", "JaffaHorusH", "JaffaSerpentL", "JaffaSerpentM", "JaffaSerpentH",
-    "JaffaJackalL", "JaffaJackalM", "JaffaJackalH", "JaffaCaptain", "JaffaGrunt", "GoauldFirstPrime",
-    "HaakenGrunt", "HaakenWarrior", "HaakenLeader", "Goauld", "Anubis",
-    "Replicator", "MediumGreenReplicator", "MediumPurpleReplicator", "BigReplicator", "ReplicatorQueen",
-    "Ptero", "PteroBoss"
+/* Page 2: secret NPC spawner (Del). Types console commands into the game: summon StargateContent.<name>.
+ * Pawns spawned during play get no controller and no weapons (Pawn.PostBeginPlay / StargatePawn.PostBeginPlay only do that while
+ * Level.bStartup is set), so each spawn briefly sets bStartup and gives the class a controller class (ctrl). ctrl NULL = no brain. */
+static const struct { const char *name, *ctrl; } s_npc_def[] = {
+    { "JaffaHorusL", "JaffaBotLight" },  { "JaffaHorusM", "JaffaBotMedium" },  { "JaffaHorusH", "JaffaBotHeavy" },
+    { "JaffaSerpentL", "JaffaBotLight" }, { "JaffaSerpentM", "JaffaBotMedium" }, { "JaffaSerpentH", "JaffaBotHeavy" },
+    { "JaffaJackalL", "JaffaBotLight" },  { "JaffaJackalM", "JaffaBotMedium" },  { "JaffaJackalH", "JaffaBotHeavy" },
+    { "JaffaCaptain", "JaffaBotMedium" }, { "JaffaGrunt", "JaffaBotLight" },     { "GoauldFirstPrime", "JaffaBotHeavy" },
+    { "HaakenGrunt", "HaakenBot" },       { "HaakenWarrior", "HaakenBot" },      { "HaakenLeader", "HaakenLeaderBot" },
+    { "Goauld", "BotGoauld" },            { "Anubis", NULL },
+    { "Replicator", "BotEnemy" },         { "MediumGreenReplicator", "BotEnemy" }, { "MediumPurpleReplicator", "BotEnemy" },
+    { "BigReplicator", "BotEnemy" },      { "ReplicatorQueen", "ReplicatorQueenBot" },
+    { "Ptero", "PteroBot" },              { "PteroBoss", "PteroBossBot" },
 };
-#define NPC_COUNT ((int)(sizeof s_npc / sizeof *s_npc))
+#define NPC_COUNT ((int)(sizeof s_npc_def / sizeof *s_npc_def))
 extern void mkb_type_command(const char *cmd, int delay_ms);
 extern int mkb_name_busy(void);
 /* Experimental: the replicator classes have no mesh in this build. Assign one with the console's `set`, then summon. */
@@ -319,44 +328,60 @@ static const struct { const char *cls, *set_cmd, *summon, *kill, *skin; } s_exp[
     { "MediumPurpleReplicator", "set MediumPurpleReplicator Mesh SkeletalMesh'ReplicatorAnims.repmesh18'", "summon StargateContent.MediumPurpleReplicator", "killall StargateContent.MediumPurpleReplicator", "set MediumPurpleReplicator Skins (Texture'ReplicatorTex.RepTexPink')" },
 };
 #define EXP_COUNT ((int)(sizeof s_exp / sizeof *s_exp))
-static const char *s_chain[5]; static int s_chain_n, s_chain_i;
+#define CHAIN_MAX 10
+static const char *s_chain[CHAIN_MAX]; static int s_chain_n, s_chain_i;
+static char s_chain_buf[4][112];
 static void mn_chain_tick(void)
 {   /* types the queued console commands one after another, each once the previous has finished */
-    if (s_chain_i < s_chain_n && !mkb_name_busy()) mkb_type_command(s_chain[s_chain_i++], 300);
+    if (s_chain_i < s_chain_n && !mkb_name_busy()) mkb_type_command(s_chain[s_chain_i++], 30);
+    if (s_chain_i >= s_chain_n && !mkb_name_busy()) g_sg1_show_typing = 0;   /* chain finished */
 }
-static void mn_spawn_npc(int i)
+static void mn_chain_add(const char *c) { if (s_chain_n < CHAIN_MAX) s_chain[s_chain_n++] = c; }
+static int s_ai_on;   /* row 0 of the list: while on, Level.bStartup stays true, so spawned pawns get a controller and their default weapons */
+static void mn_spawn_npc(int row)      /* row 0 = the AI switch, rows 1.. = NPCs */
 {
-    char cmd[64];
-    if (i < 0 || i >= NPC_COUNT) return;
-    {   int k;   /* the replicators have no mesh in this build: assign one first (see s_exp) */
-        static int done[EXP_COUNT];   /* the mesh stays assigned for the rest of the run, so later spawns need only the summon */
-        for (k = 0; k < EXP_COUNT; k++) if (!strcmp(s_npc[i], s_exp[k].cls)) {
-            if (done[k] && !(GetAsyncKeyState(VK_SHIFT) & 0x8000)) {   /* hold Shift to redo the whole sequence (e.g. after a map change) */
-                s_chain[0] = s_exp[k].summon; s_chain_n = 1; s_chain_i = 0;
-                return;
-            }
-            done[k] = 1;
-            /* summon first so the class is loaded (`set` only finds loaded classes), then set the mesh, then summon again */
-            s_chain[0] = s_exp[k].summon; s_chain[1] = s_exp[k].set_cmd;
-            s_chain_n = 2;
-            if (s_exp[k].skin) s_chain[s_chain_n++] = s_exp[k].skin;
-            s_chain[s_chain_n++] = s_exp[k].kill;   /* remove the first (meshless) one so the second does not collide with it */
-            s_chain[s_chain_n++] = s_exp[k].summon;
-            s_chain_i = 0;
-            return;
-        }
+    int i = row - 1, k, redo = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;      /* Shift: redo the one-time setup steps */
+    static int mesh_done[EXP_COUNT], brain_done[NPC_COUNT];
+    const char *name, *ctrl;
+    s_chain_n = 0; s_chain_i = 0;
+    g_sg1_show_typing = 1;          /* let the player see the console while it types */
+    if (row == 0) {
+        if (!redo) s_ai_on = !s_ai_on;        /* Shift+Right just sends the current state again (a new map resets the flag) */
+        mn_chain_add(s_ai_on ? "set LevelInfo bStartup true" : "set LevelInfo bStartup false");
+        return;
     }
-    snprintf(cmd, sizeof cmd, "summon StargateContent.%s", s_npc[i]);
-    mkb_type_command(cmd, 400);          /* the console is typed after the menu has closed */
+    if (i < 0 || i >= NPC_COUNT) return;
+    name = s_npc_def[i].name; ctrl = s_ai_on ? s_npc_def[i].ctrl : NULL;
+    snprintf(s_chain_buf[0], sizeof s_chain_buf[0], "summon StargateContent.%s", name);
+    for (k = 0; k < EXP_COUNT; k++) if (!strcmp(name, s_exp[k].cls)) {
+        if (!mesh_done[k] || redo) {   /* the mesh stays assigned for the rest of the run */
+            mesh_done[k] = 1;
+            if (s_ai_on) mn_chain_add("set LevelInfo bStartup false");   /* the bare meshless pawn must not get a brain (it would wander off unseen) */
+            mn_chain_add(s_exp[k].summon); mn_chain_add(s_exp[k].set_cmd);   /* summon first so the class is loaded, then set the mesh */
+            if (s_exp[k].skin) mn_chain_add(s_exp[k].skin);
+            mn_chain_add(s_exp[k].kill);                                     /* remove the meshless one so the real one does not collide with it */
+        }
+        break;
+    }
+    /* the log shows bStartup does not stay true after the mesh setup, so re-arm it right before every AI spawn (one short extra command) */
+    if (s_ai_on) mn_chain_add("set LevelInfo bStartup true");
+    if (ctrl) {
+        if (!brain_done[i] || redo) {
+            brain_done[i] = 1;
+            snprintf(s_chain_buf[1], sizeof s_chain_buf[1], "set %s ControllerClass Class'%s.%s'", name, strcmp(ctrl, "BotEnemy") ? "StargateContent" : "StargateGame", ctrl);   /* BotEnemy lives in StargateGame; the wrong package gave None, i.e. no brain at all */
+            mn_chain_add(s_chain_buf[1]);
+        }
+        mn_chain_add(s_chain_buf[0]);
+    } else mn_chain_add(s_chain_buf[0]);
 }
-static int mn_items(void) { return s_mn_page == 2 ? NPC_COUNT : s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
+static int mn_items(void) { return s_mn_page == 2 ? NPC_COUNT + 1 : s_mn_page ? (int)(sizeof s_mn_dbg / sizeof *s_mn_dbg) : (int)(sizeof s_mn_main / sizeof *s_mn_main); }
 static int mn_code(int i) { return s_mn_page == 2 ? 1000 + i : s_mn_page ? s_mn_dbg[i] : s_mn_main[i]; }
 
 static void mn_text(int i, char *b, int n)
 {
     int c = mn_code(i);
     b[0] = 0;
-    if (c >= 1000) { if (c - 1000 < NPC_COUNT) snprintf(b, n, "%s", s_npc[c - 1000]); return; }
+    if (c >= 1000) { if (c == 1000) snprintf(b, n, "AI (bStartup)  < %s >   Right = toggle", s_ai_on ? "ON" : "off"); else if (c - 1001 < NPC_COUNT) snprintf(b, n, "%s%s", s_npc_def[c - 1001].name, s_npc_def[c - 1001].ctrl ? "" : "  (no AI)"); return; }
     if (c == 0) snprintf(b, n, "Mouse sensitivity   < %.1f >", (double)mkb_scale_get());
     else if (c == 1) { mkb_scale_get(); snprintf(b, n, "Invert mouse Y       < %s >", g_mkb_invert_y ? "on" : "off"); }
     else if (c == 2) snprintf(b, n, "Game controllers    < %s >", sg1_controllers_on() ? "on" : "off");
@@ -481,7 +506,7 @@ static void sg1_menu_frame(HWND hwnd, uint32_t *px, uint32_t w, uint32_t h)
                 TextOutA(dc, fpx / 2, ty, line, (int)strlen(line));
             }
             SetTextColor(dc, RGB(150, 150, 150));
-            { char hl[96]; if (s_mn_page == 2) snprintf(hl, sizeof hl, "Hold Shift + Right to redo the replicator setup (%d/%d)", s_mn_sel + 1, n); else if (rows < n) snprintf(hl, sizeof hl, "Up/Down select  (%d/%d)", s_mn_sel + 1, n); else snprintf(hl, sizeof hl, "Up/Down select  Left/Right change"); TextOutA(dc, fpx / 2, fpx * (rows + 2) + fpx / 3, hl, (int)strlen(hl)); }
+            { char hl[96]; if (s_mn_page == 2) snprintf(hl, sizeof hl, "Row 1 = AI switch. Shift = redo setup (%d/%d)", s_mn_sel + 1, n); else if (rows < n) snprintf(hl, sizeof hl, "Up/Down select  (%d/%d)", s_mn_sel + 1, n); else snprintf(hl, sizeof hl, "Up/Down select  Left/Right change"); TextOutA(dc, fpx / 2, fpx * (rows + 2) + fpx / 3, hl, (int)strlen(hl)); }
             SelectObject(dc, old); DeleteObject(fnt);
             GdiFlush();
             dib = (uint32_t *)bits;

@@ -100,6 +100,7 @@ TEXT_PATCHES = [
 def run_text_patches(a):
     rc = 0
     for p in TEXT_PATCHES:
+        if a.only and p['id'] != a.only: continue
         path = os.path.join(a.gamedir, p['file']); bak = path + '.orig_sg1'
         print('[%s] %s' % (p['id'], p['file']))
         if a.revert:
@@ -120,6 +121,111 @@ def run_text_patches(a):
         open(path, 'wb').write(nl.join(lines)); print('  patched, backup at', bak)
     return rc
 
+# New-file patches: create a game config file that is missing from the disc image.
+NEW_FILES = [
+    dict(
+        id="replicator-tweak-ini",
+        file=os.path.join("System", "Tweak", "Pawns", "Replicator.ini"),
+        why=("The game has no tweak file for the Replicator classes, so with the developer "
+             "spawner they came out with default (not replicator) stats. This writes one with "
+             "stats modelled on the other enemy pawn files. Only used by the NPC spawner menu."),
+        text="""[Stargatecontent.Replicator]
+Health=25
+GroundSpeed=300
+WalkingPct=0.50
+CrouchedPct=0.50
+WaterSpeed=300
+JumpZ=250
+AirControl=0.35
+BaseEyeHeight=12
+BaseCrouchEyeHeight=8
+FearSpotReactionDelay=0.25
+UnderWaterTime=5
+DrowningDamageRate=100
+BotSkill=3.0
+MoraleDeathInc=0.1
+AccelRate=500
+PlayerAccelRate=2048
+RotationRate=(Pitch=0,Yaw=20000,Roll=2048)
+
+[Stargatecontent.MediumGreenReplicator]
+Health=60
+GroundSpeed=300
+WalkingPct=0.50
+CrouchedPct=0.50
+WaterSpeed=300
+JumpZ=250
+AirControl=0.35
+BaseEyeHeight=18
+BaseCrouchEyeHeight=12
+FearSpotReactionDelay=0.25
+UnderWaterTime=5
+DrowningDamageRate=100
+BotSkill=3.0
+MoraleDeathInc=0.1
+AccelRate=500
+PlayerAccelRate=2048
+RotationRate=(Pitch=0,Yaw=20000,Roll=2048)
+
+[Stargatecontent.MediumPurpleReplicator]
+Health=60
+GroundSpeed=300
+WalkingPct=0.50
+CrouchedPct=0.50
+WaterSpeed=300
+JumpZ=250
+AirControl=0.35
+BaseEyeHeight=18
+BaseCrouchEyeHeight=12
+FearSpotReactionDelay=0.25
+UnderWaterTime=5
+DrowningDamageRate=100
+BotSkill=3.0
+MoraleDeathInc=0.1
+AccelRate=500
+PlayerAccelRate=2048
+RotationRate=(Pitch=0,Yaw=20000,Roll=2048)
+
+[Stargatecontent.BigReplicator]
+Health=250
+GroundSpeed=350
+WalkingPct=0.50
+CrouchedPct=0.50
+WaterSpeed=300
+JumpZ=250
+AirControl=0.35
+BaseEyeHeight=40
+BaseCrouchEyeHeight=28
+FearSpotReactionDelay=0.25
+UnderWaterTime=5
+DrowningDamageRate=100
+BotSkill=3.0
+MoraleDeathInc=0.1
+AccelRate=500
+PlayerAccelRate=2048
+RotationRate=(Pitch=0,Yaw=20000,Roll=2048)
+""",
+    ),
+]
+
+def run_new_files(a):
+    rc = 0
+    for p in NEW_FILES:
+        if a.only and p['id'] != a.only: continue
+        path = os.path.join(a.gamedir, p['file'])
+        print('[%s] %s' % (p['id'], p['file']))
+        if a.revert:
+            if os.path.exists(path) and open(path, 'rb').read() == p['text'].replace('\n', '\r\n').encode():
+                os.remove(path); print('  removed')
+            else: print('  not ours or missing, left alone')
+            continue
+        if os.path.exists(path): print('  already present, left alone'); continue
+        if not os.path.isdir(os.path.dirname(path)): print('  Tweak\\Pawns folder missing, skipped'); rc = 1; continue
+        print('  needs file (%s)' % p['why'])
+        if a.check: continue
+        open(path, 'wb').write(p['text'].replace('\n', '\r\n').encode()); print('  created')
+    return rc
+
 def find_patch(d, p):
     names, exports = parse(d)
     old = names.index(p['old_call']); new = names.index(p['new_call'])
@@ -137,11 +243,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('gamedir', help='folder that contains System\\ (your extracted game files)')
     ap.add_argument('--check', action='store_true'); ap.add_argument('--revert', action='store_true')
+    ap.add_argument('--only', metavar='ID', help='apply only the patch with this id (setup_sg1.py uses this for the always-safe file additions)')
     a = ap.parse_args()
     sysdir = os.path.join(a.gamedir, 'System')
     if not os.path.isdir(sysdir): sys.exit('no System folder in ' + a.gamedir)
     rc = 0
     for p in PATCHES:
+        if a.only and p['id'] != a.only: continue
         path = os.path.join(sysdir, p['package']); bak = path + '.orig_sg1'
         print('[%s] %s' % (p['id'], p['package']))
         if a.revert:
@@ -161,6 +269,7 @@ def main():
         at = off + ho[0]; d[at:at + len(nc)] = nc
         open(path, 'wb').write(d); print('  patched, backup at', bak)
     rc |= run_text_patches(a)
+    rc |= run_new_files(a)
     sys.exit(rc)
 
 if __name__ == '__main__':

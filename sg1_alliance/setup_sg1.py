@@ -59,6 +59,10 @@ try:   # plain stargates ignore their second trigger in the retail scripts, so t
     run('Fixing the stargate that never closes (StargateContent.u)', [py, os.path.join(here, 'tools', 'patch_gate_close.py'), os.path.join(os.path.dirname(xbe), 'System', 'StargateContent.u')], cwd=here)
 except SystemExit:
     print('(gate fix not applied; run tools\\patch_gate_close.py by hand)')
+try:   # the game has no tweak file for the Replicator classes; the developer NPC spawner needs one (new file only, never overwrites)
+    run('Adding the missing Replicator tweak file (Replicator.ini)', [py, os.path.join(here, 'tools', 'patches', 'sg1patch.py'), os.path.dirname(xbe), '--only', 'replicator-tweak-ini'], cwd=here)
+except SystemExit:
+    print('(Replicator.ini not added; run tools\\patches\\sg1patch.py by hand)')
 if '--build' in flags:
     if not shutil.which('cmake'):
         print('cmake not found: open a "x64 Native Tools Command Prompt for VS 2022" and run this script again, or build by hand (below).')
