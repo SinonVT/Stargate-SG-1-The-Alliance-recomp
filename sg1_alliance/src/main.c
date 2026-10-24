@@ -183,6 +183,61 @@ void sg1_bar_probe(uint32_t act) {
  * fill fraction. The retail renderer never applies that scale, so the bars never move. With "Fix HUD bars" on, the DrawActor hook calls sg1_bar_apply() just
  * before a HUD widget is drawn: the widget's DrawScale3D.Y (+0x270, the width) is multiplied by the fill, and sg1_bar_restore() puts it back afterwards. */
 extern int sg1_barfix_on(void);
+int g_sg1_downmark;   /* SG1DOWN (game_hooks/recomp_0027_remote_player_look.patch): set per call of the pawn look update */
+/* SG1LOOKLOG: SG1_LOOKLOG=1 logs the pawn look/twist update (recomp_0027 sub_001A27D0 / sub_0019E430), every pawn about once a second.
+ * where: 0 = look update start, 1 = Controller (ViewPitch) branch, 2 = no-Controller branch (+ head look), 3 = bone update args (a = root yaw, b = spine),
+ * 4 = movement-anim update entry (sub_001A3680; skipped when flags600 & 0x80). */
+void sg1_looklog(int where, uint32_t pawn, uint32_t a, uint32_t b) {
+    static int on = -1; static unsigned lines; static uint32_t kp[128]; static DWORD kt[128][5]; static int nk;
+    int i; DWORD now;
+    if (on < 0) { const char *e = getenv("SG1_LOOKLOG"); on = (e && e[0] == '1'); }
+    if (!on || !g_xbox_mem_offset || !bp_ok(pawn) || lines > 40000) return;
+    for (i = 0; i < nk; i++) if (kp[i] == pawn) break;
+    if (i == nk) { if (nk >= 128) return; kp[nk] = pawn; kt[nk][0] = kt[nk][1] = kt[nk][2] = kt[nk][3] = kt[nk][4] = 0; nk++; }
+    now = GetTickCount();
+    if (now - kt[i][where % 5] < 1000u) return;
+    kt[i][where % 5] = now; lines++;
+    fprintf(stderr, "[LOOK] t=%lu w=%d pawn=%X loc=(%.0f %.0f %.0f) rot=(%d %d %d) ctrl=%X lta=%X ltv=(%.1f %.1f %.1f) vp=%u flags608=%02X clp=%.3f phys=%u f600=%08X a=%d b=%d\n",
+            (unsigned long)now, where, pawn, bp_f(pawn + 0x154), bp_f(pawn + 0x158), bp_f(pawn + 0x15C),
+            (int32_t)bp_u32(pawn + 0x160), (int32_t)bp_u32(pawn + 0x164), (int32_t)bp_u32(pawn + 0x168),
+            bp_u32(pawn + 0x390), bp_u32(pawn + 0x7B0), bp_f(pawn + 0x7B4), bp_f(pawn + 0x7B8), bp_f(pawn + 0x7BC),
+            bp_u32(pawn + 0x614) & 0xFF, bp_u32(pawn + 0x608) & 0xFF, bp_f(pawn + 0x7FC), bp_u32(pawn + 0x80) & 0xFF, bp_u32(pawn + 0x600), (int32_t)a, (int32_t)b);
+    fflush(stderr);
+}
+/* Which bar is this? The widget's StaticMesh bounding box is fixed data (same in single player, host and client), while the old
+ * per-widget id (actor+0x40 & 0xFFF) changes between sessions (multiplayer showed a health bar shrinking from both ends).
+ * Find the mesh FBox (min xyz, max xyz, valid byte) through the actor, match its min.Y, and return the anchor L (0 = unknown). Cached per actor. */
+static float sg1_bar_L_from_mesh(uint32_t act) {
+    static const float mins[4] = { -21.638f, 2.888f, -58.127f, -53.209f };   /* shield/health, stamina, ammo, extra ammo (mesh left ends) */
+    static const float Ls[4]   = { -21.638f, 2.888f, -6.027f,  -6.496f  };   /* ammo bars are anchored at their right end */
+    static uint32_t c_act[32], c_box[32]; static int c_k[32], nc;
+    int i, o, q, k;
+    for (i = 0; i < nc; i++) if (c_act[i] == act) {
+        if (c_k[i] < 0) return 0.0f;
+        if (fabsf(bp_f(c_box[i] + 4) - mins[c_k[i]]) < 0.01f) return Ls[c_k[i]];
+        c_act[i] = 0; break;                       /* stale (actor reused): scan again */
+    }
+    for (o = 0x3C; o <= 0x4A0; o += 4) {   /* actor+0x40 is the StaticMesh (log 2026-10-24: 0x20A9840/680/4C0/300); then the old wider scan */
+        uint32_t p;
+        if (o == 0x284 || (o > 0x44 && o < 0x100)) continue;
+        p = bp_u32(act + o);
+        if (!bp_ok(p) || p + 0x200 >= 0x0FF00000u) continue;
+        for (q = 0x10; q <= 0x160; q += 4) {
+            float mnY, mxY;
+            if ((bp_u32(p + q + 24) & 0xFFu) != 1u) continue;
+            mnY = bp_f(p + q + 4); mxY = bp_f(p + q + 16);
+            if (!(mxY > mnY)) continue;
+            for (k = 0; k < 4; k++) if (fabsf(mnY - mins[k]) < 0.01f) {
+                for (i = 0; i < nc && c_act[i]; i++) ;
+                if (i < 32) { c_act[i] = act; c_box[i] = p + q; c_k[i] = k; if (i == nc) nc++; }
+                return Ls[k];
+            }
+        }
+    }
+    for (i = 0; i < nc && c_act[i]; i++) ;
+    if (i < 32) { c_act[i] = act; c_box[i] = 0; c_k[i] = -1; if (i == nc) nc++; }
+    return 0.0f;
+}
 static uint32_t g_bar_act; static float g_bar_y, g_bar_f, g_bar_L; static float g_bar_loc[3]; static int g_bar_shifted;
 void sg1_bar_apply(uint32_t act) {
     uint32_t p, obj; float f, ys;
@@ -200,11 +255,16 @@ void sg1_bar_apply(uint32_t act) {
     if (!(ys > 0.005f && ys < 1.0f)) return;
     if (f < 0.001f) f = 0.001f;   /* empty = nothing visible (a zero scale is avoided) */
     g_bar_act = act; g_bar_y = ys; g_bar_f = f; g_bar_shifted = 0;
-    switch (bp_u32(act + 0x40) & 0xFFF) {   /* which bar: identified by a per-widget field; L = left end of its mesh along the width axis */
+    g_bar_L = sg1_bar_L_from_mesh(act);
+    if (g_bar_L == 0.0f) switch (bp_u32(act + 0x40) & 0xFFF) {   /* fallback: old per-session id */   /* which bar: identified by a per-widget field; L = left end of its mesh along the width axis */
         case 0xDC0: g_bar_L = -21.638f; break;  /* shield  */
         case 0xC00: g_bar_L = 2.888f; break;    /* stamina */
         case 0xA40: g_bar_L = -6.027f; break;   /* ammo: anchored at its RIGHT end (empties left to right, as on the Xbox) */
         case 0x880: g_bar_L = -6.496f; break;   /* extra ammo: anchored at its RIGHT end (fills right to left) */
+        case 0x840: g_bar_L = -21.638f; break;  /* same four bars, ids seen 2026-10-24 (the id is a pointer: it moves) */
+        case 0x680: g_bar_L = 2.888f; break;
+        case 0x4C0: g_bar_L = -6.027f; break;
+        case 0x300: g_bar_L = -6.496f; break;
         default: g_bar_L = 0.0f; break;
     }
     { float v = ys * f; *(volatile float *)((uintptr_t)(act + 0x270) + (uintptr_t)g_xbox_mem_offset) = v; }

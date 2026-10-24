@@ -42,6 +42,42 @@ extern ptrdiff_t g_xbox_mem_offset;
 #define M8(a)  (*(volatile uint8_t  *)H(a))
 #define ARG(i) M32(g_esp + 4u + 4u * (i))
 
+/* SG1NET: when the host restarts the level (Restart / ServerTravel) the client starts reconnecting at once, then the host closes the
+ * old level and the client's FAILURE handler (game_hooks/recomp_0023_coop_reconnect.patch) would travel to '?failed' = main menu.
+ * It is ignored when a reconnect (not the first connect of this run) started less than 15 s ago. */
+static volatile uint32_t g_sg1_conn_tick, g_sg1_conn_count;
+/* SG1NET: note from the client network tick (recomp_0023_coop_reconnect.patch), at most once a second */
+/* SG1NET debug (game_hooks/recomp_0019_net_close_trace.patch): SG1_NETTRACE=1 prints the code addresses on the guest stack when a net
+ * connection is closed, so the caller chain can be looked up in src/recomp/gen (loc_XXXXXXXX labels). */
+void sg1_close_trace(uint32_t sp, uint32_t conn)
+{
+    static int on = -1; int i, n = 0;
+    if (on < 0) { const char *e = getenv("SG1_NETTRACE"); on = (e && e[0] == '1'); }
+    if (!on) return;
+    fprintf(stderr, "[SG1CLOSE] conn=%08X stack:", conn);
+    for (i = 0; i < 160 && n < 24; i++) { uint32_t v = M32(sp + 4u * (uint32_t)i); if (v >= 0x00011000u && v < 0x00420000u) { fprintf(stderr, " %08X", v); n++; } }
+    fprintf(stderr, "\n"); fflush(stderr);
+}
+
+int g_sg1_keep;   /* SG1NET: set by the TickNetClient hook, read before its SetClientTravel("mainmenu.unr") */
+void sg1_netnote(const char *msg)
+{
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (now - last < 1000u) return;
+    last = now;
+    fprintf(stderr, "[SG1NET] %s\n", msg); fflush(stderr);
+}
+
+int sg1_skip_failed(int site)
+{
+    uint32_t dt = (uint32_t)GetTickCount() - g_sg1_conn_tick;
+    int skip = g_sg1_conn_count >= 2 && dt < 15000u;
+    fprintf(stderr, "[SG1NET] FAILURE -> '?failed' (site %d) %u ms after connect #%u: %s\n", site, dt, g_sg1_conn_count, skip ? "ignored, reconnecting" : "to menu");
+    fflush(stderr);
+    return skip;
+}
+
 static int s_log = -1;
 static int logging(void)
 {
@@ -90,6 +126,12 @@ static SOCKET host_sock(uint32_t gs, int create)
         u_long nb = 1; BOOL one = TRUE;
         ioctlsocket(hs, FIONBIO, &nb);
         setsockopt(hs, SOL_SOCKET, SO_BROADCAST, (const char *)&one, sizeof one);
+        {   /* Windows reports an ICMP 'port unreachable' as WSAECONNRESET on the next recvfrom of a UDP socket. The Xbox never does; the engine
+             * treats it as a dead connection, so a client reconnecting while the host reloads the map (Restart / ServerTravel) fell back to the menu. */
+            BOOL no = FALSE; DWORD ret = 0;
+            WSAIoctl(hs, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &no, sizeof no, NULL, 0, &ret, NULL, NULL);
+            WSAIoctl(hs, _WSAIOW(IOC_VENDOR, 15) /* SIO_UDP_NETRESET */, &no, sizeof no, NULL, 0, &ret, NULL, NULL);
+        }
         s_tab[free_i].gs = gs; s_tab[free_i].hs = hs;
         NLOG("[NETHLE] host UDP socket created for guest socket %08X\n", gs);
     }
@@ -324,6 +366,7 @@ int sg_xnet_hle(uint32_t va)
         if (r > 0 && !(fl & MSG_PEEK) && is_discovery_port(hs) && is_dup_datagram((const char *)H(gb), r, &from)) { WSASetLastError(WSAEWOULDBLOCK); r = -1; }
         if (r < 0) {
             int e = WSAGetLastError();
+            if (e == WSAECONNRESET || e == WSAENETRESET) e = WSAEWOULDBLOCK;   /* see host_sock: UDP 'reset' is not a real error */
             set_guest_error(e);
             g_eax = (uint32_t)-1;
         } else {
@@ -374,6 +417,7 @@ int sg_xnet_hle(uint32_t va)
         return 4;
     }
     case 0x4191FBu: {           /* XNetXnAddrToInAddr(pxna, pxnkid, pina): the "secure" address is just the real one here */
+        g_sg1_conn_tick = GetTickCount(); g_sg1_conn_count++;   /* SG1NET: a client connect (InitConnect) starts here */
         uint32_t gx = ARG(0), gi = ARG(2);
         if (gx && gi) M32(gi) = M32(gx);
         HLOG("[NETHLE] XnAddrToInAddr -> %u.%u.%u.%u\n", gx ? M8(gx) : 0, gx ? M8(gx + 1) : 0, gx ? M8(gx + 2) : 0, gx ? M8(gx + 3) : 0);

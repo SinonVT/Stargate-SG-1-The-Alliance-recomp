@@ -1,0 +1,6 @@
+--- a/recomp_0043.c
++++ b/recomp_0043.c
+@@ -27880,2 +27880,3 @@
+ loc_002FFBB4: ;
++    MEM32(esp + 0x28) = 0;   /* SG1 fix: GUIStyles.DrawText optional OverrideColor: clear the local first. When the script omits it, the old stack contents were taken as the colour (alpha 1/255), so text drawn without one (Tab OBJECTIVES list on host / single player) was invisible. */
+     MEM32(0x5FBEB8) = ebx;

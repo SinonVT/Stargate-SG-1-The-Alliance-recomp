@@ -1,5 +1,37 @@
 --- a/recomp_0027.c
 +++ b/recomp_0027.c
+@@ -15000,4 +15000,5 @@
+     esi = ecx;
++    { extern void sg1_looklog(int, uint32_t, uint32_t, uint32_t); sg1_looklog(4, esi, 0, 0); }   /* SG1LOOKLOG: movement-anim update entry (gate: Level NetMode, flags +0x600 bit 0x80) */
+     eax = MEM32(esi + 0xA0);
+     SET_LO8(ecx, MEM8(eax + 0x71C));
+@@ -8220,8 +8220,9 @@
+     PUSH32(esp, ebx);
+     PUSH32(esp, ebp);
+     PUSH32(esp, esi);
+     esi = ecx;
++    { extern void sg1_looklog(int, uint32_t, uint32_t, uint32_t); sg1_looklog(3, esi, MEM32(esp + 0x1C), MEM32(esp + 0x20)); }   /* SG1LOOKLOG: args of the bone update (root yaw, spine pitch) */
+     _fa = (uint32_t)(MEM8(esi + 0x608)) & 0xFFu; _fb = (uint32_t)(0x10) & 0xFFu;
+     _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* test MEM8(esi + 0x608), 0x10 (8-bit) */
+     PUSH32(esp, edi);
+@@ -15540,4 +15540,5 @@
+ loc_001A2C22: ;
++    { extern void sg1_looklog(int, uint32_t, uint32_t, uint32_t); sg1_looklog(1, esi, 0, 0); }   /* SG1LOOKLOG */
+     eax = ZX8(MEM8(esi + 0x614));
+     eax = eax << 8;
+@@ -15130,10 +15130,12 @@
+ loc_001A27D0: ;
+     _fb = (uint32_t)(0x44) & 0xFFFFFFFFu; _fbs = (int32_t)(int32_t)(_fb); /* sub source, before the write */
+     esp = esp - 0x44;
+     _fa = (uint32_t)(esp) & 0xFFFFFFFFu; _fas = (int32_t)(int32_t)(_fa); /* sub result */
+     PUSH32(esp, esi);
+     esi = ecx;
++    /* SG1DOWN: the co-op script marks a downed / knocked-back remote player with LookTargetActor == Level. Treat it like the host's own pawn: no look-at target (LookTargetActor cleared; the script sets the mark again every frame), and the look pitch comes from the replicated ViewPitch (jump at loc_001A2C4A). */
++    { extern void sg1_looklog(int, uint32_t, uint32_t, uint32_t); sg1_looklog(0, esi, 0, 0); }   /* SG1LOOKLOG */
++    { extern int g_sg1_downmark; g_sg1_downmark = 0; if (MEM32(esi + 0x7B0) != 0 && MEM32(esi + 0x7B0) == MEM32(esi + 0xA0)) { MEM32(esi + 0x7B0) = 0; g_sg1_downmark = 1; } }
+     _fa = (uint32_t)(MEM8(esi + 0x608)) & 0xFFu; _fb = (uint32_t)(0x10) & 0xFFu;
+     _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* test MEM8(esi + 0x608), 0x10 (8-bit) */
+     if (TEST_Z(_fa, _fb)) goto loc_001A2DFE; /* je: equal / zero */
 @@ -15537,6 +15537,8 @@
  loc_001A2C45: ;
      goto loc_001A2D59;
@@ -7,6 +39,8 @@
  loc_001A2C4A: ;
 +    /* SG1LOOK: UpdateTwistLook (sub_001A27D0) only follows the real view pitch when the pawn has a Controller; on a client other players' pawns have none, so their look up/down never showed. The co-op script marks such a pawn with LookTargetActor == itself; treat it like the Controller branch above (look = ViewPitch, which the server replicates). */
 +    if (MEM32(esi + 0x7B0) == esi) goto loc_001A2C22;
++    { extern int g_sg1_downmark; if (g_sg1_downmark) goto loc_001A2C22; }   /* SG1DOWN */
++    { extern void sg1_looklog(int, uint32_t, uint32_t, uint32_t); sg1_looklog(2, esi, 0, 0); }   /* SG1LOOKLOG */
      _fa = (uint32_t)(MEM32(esi + 0x7B0)) & 0xFFFFFFFFu; _fb = (uint32_t)(ebx) & 0xFFFFFFFFu;
      _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp MEM32(esi + 0x7B0), ebx (32-bit) */
      xmm0.f[0] = (float)(int32_t)MEM32(esp + 0x48); /* cvtsi2ss */

@@ -1,0 +1,44 @@
+# SG1NET: the client handler for the server FAILURE message (sub_00160190) travels to "?failed" = main menu. During a co-op
+# Restart the host closes the old level while the client is already reconnecting, so that dropped the client. sg1_skip_failed()
+# (xnet_shim.c) ignores it while a reconnect started less than 15 s ago (not on the first connection).
+# The drop that actually happened (log 2026-10-24 16:09) is ULevel::TickNetClient (sub_00165A30): old server connection closed ->
+# SetClientTravel("mainmenu.unr") even when the engine already has a pending level (+0x124). That case now still closes the old net
+# driver (frees its socket) but skips the travel to the main menu, so the pending connection can finish.
+--- a/recomp_0023.c
++++ b/recomp_0023.c
+@@ -23960,9 +23960,10 @@
+ loc_001602DC: ;
+     ebx = MEM32(ebx + 0x18);
+     eax = MEM32(ebx + 0x30);
+     ecx = MEM32(eax + 0x2C);
+     eax = MEM32(ecx);
+     edx = MEM32(ebx);
++    { extern int sg1_skip_failed(int); if (sg1_skip_failed(1)) goto loc_001602FB; }   /* SG1NET: keep a co-op reconnect (Restart / ServerTravel) alive, see xnet_shim.c */
+     { uint32_t _icall_esp = g_esp;
+     PUSH32(esp, 0);
+     PUSH32(esp, 0);
+     PUSH32(esp, 0x50E80C);
+@@ -24228,9 +24229,10 @@
+ loc_00160492: ;
+     ebx = MEM32(ebx + 0x18);
+     eax = MEM32(ebx + 0x30);
+     ecx = MEM32(eax + 0x2C);
+     eax = MEM32(ecx);
+     edx = MEM32(ebx);
++    { extern int sg1_skip_failed(int); if (sg1_skip_failed(2)) goto loc_001604B1; }   /* SG1NET */
+     { uint32_t _icall_esp = g_esp;
+     PUSH32(esp, 0);
+     PUSH32(esp, 0);
+     PUSH32(esp, 0x50E80C);
+@@ -36268,6 +36268,7 @@
+ loc_00165AA0: ;
+     eax = MEM32(esi + 0x124);
++    { extern int g_sg1_keep; g_sg1_keep = (eax != 0); if (eax != 0) { extern void sg1_netnote(const char *); sg1_netnote("server connection closed while a new connection is pending (co-op Restart / ServerTravel): old net driver closed, no main menu"); goto loc_00165B8F; } }   /* SG1NET: ULevel::TickNetClient, 0x124 = UGameEngine pending level */
+     _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(0) & 0xFFFFFFFFu;
+     _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, 0 (32-bit) */
+     if (CMP_NE(_fa, _fb)) goto loc_00165BA4; /* jne: not equal / not zero */
+@@ -36420,3 +36420,4 @@
+ loc_00165BC8: ;
++    { extern int g_sg1_keep; if (g_sg1_keep) { g_sg1_keep = 0; goto loc_00165BE5; } }   /* SG1NET: no SetClientTravel("mainmenu.unr") while reconnecting */
+     ecx = MEM32(ebx + 0x40);
+     edx = MEM32(ecx + 0x30);

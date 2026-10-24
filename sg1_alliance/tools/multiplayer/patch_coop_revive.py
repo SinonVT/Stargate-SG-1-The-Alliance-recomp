@@ -313,7 +313,7 @@ def main():
     mems = []; mm = 0
     for s, a in stm: mems.append(mm); mm += a
     P_ins = mems[n - 2]
-    T1 = b'\xb9' + I(r_kd) + L(dt[0]) + b'\x16'                                        # KnockedDamage += DeltaTime
+    T1 = b'\xb8' + I(r_kd) + L(dt[0]) + b'\x16'                                        # KnockedDamage += DeltaTime  (native 184 = 0xB8; 0xB9 is -=)
     ISIN = ctx(I(r_ctrl), b'\x61\x19\x21' + write_ci(n_unc) + b'\x16', 4)             # Controller.IsInState('PlayerUnconscious')
     COND = AND(AND(AND(SPNN, NETNE), b'\xb1' + I(r_kd) + I(r_shock) + b'\x16'), ISIN)  # player && netgame && KnockedDamage > fShockTime && still down
     msg = b'\x1f' + b'A squad member was lost.' + b'\x00'

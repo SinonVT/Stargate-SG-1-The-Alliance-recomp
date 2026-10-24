@@ -5,7 +5,7 @@ applies our hooks, and (optionally) builds.
     python sg1_alliance\\setup_sg1.py "C:\\path\\to\\game folder"          (folder that contains default.xbe)
     python sg1_alliance\\setup_sg1.py "C:\\path\\to\\game folder" --build   (also run cmake + build)
     add --redo to regenerate even if sg1_alliance\\src\\recomp\\gen already exists
-    add --no-multiplayer to skip the co-op/multiplayer script fixes, --mp-extras to also apply the less proven ones
+    add --no-multiplayer to skip the co-op/multiplayer script fixes, --mp-no-extras to leave out the joiner character / squadmate take-over / objectives extras
 
 Run it from anywhere; needs Python 3.9+ (pip installs 'capstone' for you). The pipeline takes several minutes.
 """
@@ -73,8 +73,8 @@ try:   # the selected profile's name was never put into the join URL (the build 
 except SystemExit:
     print('(profile name patch not applied; run tools\\patch_profile_name.py by hand)')
 if '--no-multiplayer' not in flags:
-    try:   # co-op campaign / multiplayer fixes: network-only or menu-only changes, single player is not touched. --mp-extras adds the less proven ones. Undo: tools\\multiplayer\\setup_multiplayer.py <game> --revert
-        run('Applying the multiplayer / co-op script fixes', [py, os.path.join(here, 'tools', 'multiplayer', 'setup_multiplayer.py'), os.path.dirname(xbe)] + (['--extras'] if '--mp-extras' in flags else []), cwd=here)
+    try:   # co-op campaign / multiplayer fixes: network-only or menu-only changes, single player is not touched. --mp-no-extras leaves out the extras. Undo: tools\\multiplayer\\setup_multiplayer.py <game> --revert
+        run('Applying the multiplayer / co-op script fixes', [py, os.path.join(here, 'tools', 'multiplayer', 'setup_multiplayer.py'), os.path.dirname(xbe)] + (['--no-extras'] if '--mp-no-extras' in flags else []), cwd=here)
     except SystemExit:
         print('(multiplayer fixes not applied; run tools\\multiplayer\\setup_multiplayer.py by hand, it says which step failed)')
 if '--build' in flags:
