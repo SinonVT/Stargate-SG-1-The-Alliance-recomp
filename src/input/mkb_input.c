@@ -643,6 +643,9 @@ void mkb_type_command(const char *cmd, int delay_ms)
 void mkb_arm_name(int delay_ms)
 {
     LONG due;
+    /* SG1: the profile name now reaches the URL from script (patch_profile_name.py, Engine.u PlayerProfile.Initialize), so typing
+     * "SetName" into the console is off unless RECOMP_TYPE_SETNAME=1 (fallback for installs without that patch). */
+    { static int on = -1; if (on < 0) { const char *e = getenv("RECOMP_TYPE_SETNAME"); on = (e && e[0] == '1'); } if (!on) return; }
     if (!s_prof[0]) return;
     if (delay_ms < 0) { if (s_nm_done) return; delay_ms = -delay_ms; } else s_nm_done = 0;
     due = (LONG)(GetTickCount() + (DWORD)delay_ms); if (!due) due = 1;
@@ -652,15 +655,26 @@ void mkb_arm_name(int delay_ms)
 static void nm_add(unsigned vk, int down, unsigned ch) { if (s_nm_n < 318) { s_nm_seq[s_nm_n].vk = (unsigned short)vk; s_nm_seq[s_nm_n].down = (unsigned char)down; s_nm_seq[s_nm_n].rep = 0; s_nm_seq[s_nm_n].ch = (unsigned short)ch; s_nm_n++; } }
 static volatile LONG s_nm_end;
 int mkb_name_busy(void) { return s_nm_n > 0 || s_nm_due || (s_nm_end && (LONG)(GetTickCount() - (DWORD)s_nm_end) < 0); }
+static void autocmd_check(void)
+{   /* RECOMP_AUTOCMD="open M01A?Listen": typed into the game console once, RECOMP_AUTOCMD_DELAY seconds (default 30) after start */
+    static int st; static DWORD t0; const char *e, *d; int sec;
+    if (st == 2) return;
+    e = getenv("RECOMP_AUTOCMD");
+    if (!e || !*e) { st = 2; return; }
+    if (!st) { t0 = GetTickCount(); st = 1; }
+    d = getenv("RECOMP_AUTOCMD_DELAY"); sec = d ? atoi(d) : 30; if (sec < 0) sec = 0;
+    if (GetTickCount() - t0 >= (DWORD)sec * 1000u) { st = 2; mkb_type_command(e, 100); }
+}
 static int nm_next(int *vk, int *down, int *rep, int *ch)
 {
     DWORD now = GetTickCount();
+    autocmd_check();
     if (s_nm_due && !s_nm_n) {
         if ((LONG)(now - (DWORD)s_nm_due) < 0) return 0;
         {   const char *cmd = s_cmd[0] ? s_cmd : "SetName "; int i;
             nm_add(0x67, 1, 0); nm_add(0x67, 0, 0);
             nm_add(0x20, 1, ' '); nm_add(0x20, 0, 0);          /* first char is swallowed */
-            for (i = 0; cmd[i]; i++) { unsigned c = (unsigned char)cmd[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : (c == ' ' ? 0x20 : c == '.' ? 0xBE : c == '=' ? 0xBB : c == '\\' ? 0xDC : c == '/' ? 0xBF : c == '-' ? 0xBD : c == '\'' ? 0xDE : c == '(' ? 0x39 : c == ')' ? 0x30 : c); nm_add(v, 1, c); nm_add(v, 0, 0); }
+            for (i = 0; cmd[i]; i++) { unsigned c = (unsigned char)cmd[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : (c == ' ' ? 0x20 : c == '.' ? 0xBE : c == '=' ? 0xBB : c == '\\' ? 0xDC : c == '/' ? 0xBF : c == '?' ? 0xBF : c == '-' ? 0xBD : c == '\'' ? 0xDE : c == '(' ? 0x39 : c == ')' ? 0x30 : c); nm_add(v, 1, c); nm_add(v, 0, 0); }
             if (!s_cmd[0]) for (i = 0; s_prof[i]; i++) { unsigned c = (unsigned char)s_prof[i]; unsigned v = (c >= 'a' && c <= 'z') ? c - 32 : c; nm_add(v, 1, c); nm_add(v, 0, 0); }
             nm_add(0x0D, 1, 0); nm_add(0x0D, 0, 0);
         }
@@ -685,6 +699,7 @@ int mkb_kbd_pop(int *vk, int *down, int *rep, int *ch)
     static int en = -1;
     if (en < 0) { const char *e = getenv("RECOMP_MKB_KEYS"); en = !(e && e[0] == '0'); }
     if (!en || !mkb_enabled() || !s_thread_up) return 0;
+    autocmd_check();   /* RECOMP_AUTOCMD: arms the console command once the delay has passed */
     if (s_nm_due && s_active && game_is_foreground() && nm_next(vk, down, rep, ch)) return 1;
     if (s_kq_r == s_kq_w) return 0;
     if (!s_active || !game_is_foreground()) { s_kq_r = s_kq_w; return 0; }

@@ -14,11 +14,13 @@
  *
  * Env: SG_NET_IP=a.b.c.d  address reported as this machine's (default: auto)
  *      SG_NET_LOG=0       silence per-call logging
+ *      SG_NET_PEER=a.b.c.d[,e.f.g.h]  also send every broadcast (server discovery) straight to these hosts
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +29,7 @@
 
 #ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 extern __declspec(thread) uint32_t g_esp, g_eax, g_fs_base;
 #else
 extern __thread uint32_t g_esp, g_eax, g_fs_base;
@@ -157,6 +160,68 @@ static void trace_call(uint32_t va)
         }
 }
 
+/* Discovery is sent to 255.255.255.255, which Windows only puts on ONE adapter (often a virtual/link-local one), so a server on
+ * another PC never sees it. Also send it to the directed broadcast of every adapter, and to the hosts in SG_NET_PEER. */
+static void send_extra_broadcasts(SOCKET hs, const char *buf, int len, int fl, const struct sockaddr_in *to)
+{
+    static unsigned nx;
+    struct sockaddr_in d = *to;
+    const char *peer = getenv("SG_NET_PEER");
+    if (to->sin_addr.s_addr != INADDR_BROADCAST) return;
+    {   /* directed broadcast on every adapter: opt-in (SG_NET_BCAST=1); the copies leave with each adapter's own source address, which shows up as extra servers */
+        ULONG sz = 0; MIB_IPADDRTABLE *t; const char *ob = getenv("SG_NET_BCAST");
+        if (!(ob && ob[0] == '1')) goto peers;
+        GetIpAddrTable(NULL, &sz, FALSE);
+        t = sz ? (MIB_IPADDRTABLE *)malloc(sz) : NULL;
+        if (t && GetIpAddrTable(t, &sz, FALSE) == NO_ERROR) {
+            DWORD i;
+            for (i = 0; i < t->dwNumEntries; i++) {
+                DWORD a = t->table[i].dwAddr, m = t->table[i].dwMask;
+                if (!a || (a & 255) == 127) continue;
+                d.sin_addr.s_addr = a | ~m;
+                if (d.sin_addr.s_addr == INADDR_BROADCAST) continue;
+                sendto(hs, buf, len, fl, (const struct sockaddr *)&d, sizeof d);
+                if (nx++ < 30) NLOG("[NETHLE] discovery also to %u.%u.%u.%u\n", d.sin_addr.s_addr & 255, (d.sin_addr.s_addr >> 8) & 255, (d.sin_addr.s_addr >> 16) & 255, d.sin_addr.s_addr >> 24);
+            }
+        }
+        free(t);
+    }
+peers:
+    if (peer && *peer) {
+        char tmp[160], *tok, *ctx = NULL;
+        strncpy(tmp, peer, sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
+        for (tok = strtok_s(tmp, ", ;", &ctx); tok; tok = strtok_s(NULL, ", ;", &ctx)) {
+            unsigned long ip = inet_addr(tok);
+            if (ip == INADDR_NONE) continue;
+            d.sin_addr.s_addr = ip;
+            sendto(hs, buf, len, fl, (const struct sockaddr *)&d, sizeof d);
+            if (nx++ < 30) NLOG("[NETHLE] discovery also to peer %s\n", tok);
+        }
+    }
+}
+
+/* The extra discovery sends above make the host receive the same search several times (once per route). Drop a datagram that is
+ * byte-identical to one from the same sender in the last 150 ms, so the server answers once and the list shows one entry. */
+static int is_discovery_port(SOCKET hs)   /* only the server-search socket (UDP 11777, plus SG_NET_PORT_OFFSET) is de-duplicated */
+{
+    struct sockaddr_in a; int l = sizeof a; unsigned p;
+    if (getsockname(hs, (struct sockaddr *)&a, &l) != 0) return 0;
+    p = ntohs(a.sin_port);
+    return p >= 11777u && p <= 11793u;
+}
+static int is_dup_datagram(const char *buf, int len, const struct sockaddr_in *from)
+{
+    static struct { uint32_t h; DWORD t; } ring[32];
+    static unsigned pos;
+    uint32_t h = 2166136261u; int i; DWORD now = GetTickCount(); unsigned k;
+    for (i = 0; i < len && i < 512; i++) { h ^= (unsigned char)buf[i]; h *= 16777619u; }
+    h ^= (uint32_t)len;   /* the sender is NOT part of the key: copies that took different routes carry different source addresses */
+    for (k = 0; k < 32; k++)
+        if (ring[k].h == h && ring[k].t && (DWORD)(now - ring[k].t) < 150u) return 1;
+    ring[pos++ & 31].h = h; ring[(pos - 1) & 31].t = now ? now : 1;
+    return 0;
+}
+
 /* ---- the calls ---------------------------------------------------------- */
 static int hle_calls;
 #define HLOG(...) do { if (hle_calls < 400) { hle_calls++; NLOG(__VA_ARGS__); } } while (0)
@@ -256,6 +321,7 @@ int sg_xnet_hle(uint32_t va)
         static unsigned nrecv;
         if (hs == INVALID_SOCKET) { set_guest_error(WSAENOTSOCK); g_eax = (uint32_t)-1; return 24; }
         r = recvfrom(hs, (char *)H(gb), (int)len, (int)fl, (struct sockaddr *)&from, &fl2);
+        if (r > 0 && !(fl & MSG_PEEK) && is_discovery_port(hs) && is_dup_datagram((const char *)H(gb), r, &from)) { WSASetLastError(WSAEWOULDBLOCK); r = -1; }
         if (r < 0) {
             int e = WSAGetLastError();
             set_guest_error(e);
@@ -279,6 +345,7 @@ int sg_xnet_hle(uint32_t va)
         if (hs == INVALID_SOCKET) { set_guest_error(WSAENOTSOCK); g_eax = (uint32_t)-1; return 24; }
         to_host_addr(gt, &to);
         r = sendto(hs, (const char *)H(gb), (int)len, (int)fl, (struct sockaddr *)&to, sizeof to);
+        send_extra_broadcasts(hs, (const char *)H(gb), (int)len, (int)fl, &to);
         if (nsend++ < 60)
             NLOG("[NETHLE] sendto(%08X) %u bytes to %u.%u.%u.%u:%u -> %d (wsa %d)\n", gs, len,
                  to.sin_addr.s_addr & 255, (to.sin_addr.s_addr >> 8) & 255,

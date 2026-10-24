@@ -1,0 +1,12 @@
+--- a/recomp_0027.c
++++ b/recomp_0027.c
+@@ -15537,6 +15537,8 @@
+ loc_001A2C45: ;
+     goto loc_001A2D59;
+ 
+ loc_001A2C4A: ;
++    /* SG1LOOK: UpdateTwistLook (sub_001A27D0) only follows the real view pitch when the pawn has a Controller; on a client other players' pawns have none, so their look up/down never showed. The co-op script marks such a pawn with LookTargetActor == itself; treat it like the Controller branch above (look = ViewPitch, which the server replicates). */
++    if (MEM32(esi + 0x7B0) == esi) goto loc_001A2C22;
+     _fa = (uint32_t)(MEM32(esi + 0x7B0)) & 0xFFFFFFFFu; _fb = (uint32_t)(ebx) & 0xFFFFFFFFu;
+     _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp MEM32(esi + 0x7B0), ebx (32-bit) */
+     xmm0.f[0] = (float)(int32_t)MEM32(esp + 0x48); /* cvtsi2ss */
