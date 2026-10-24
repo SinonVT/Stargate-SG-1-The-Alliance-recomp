@@ -174,7 +174,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     uint32_t bpp, x, y;
 
     {   extern int mkb_name_busy(void);
-        if (mkb_name_busy() && !g_sg1_show_typing) return;       /* hide the console while the name is typed */
+        if (getenv("RECOMP_HIDE_NAME_TYPING") && mkb_name_busy() && !g_sg1_show_typing) return;   /* old behaviour (frozen screen while the name is typed) only if the env var is set */
     }
     if (!s_fb_running || !fb_va || !pitch)
         return;
