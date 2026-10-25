@@ -17,8 +17,8 @@ library = "SG1.dll"  # <exe>.dll, which the executable delay loads
 [symbols]
 _CIacos                                              = 0x3E78E0
 _CIasin                                              = 0x3E79AC
-accept                                               = 0
-bind                                                 = 0
+accept                                               = 0x4192CF
+bind                                                 = 0x4192AE
 BinkDoFrame                                          = 0
 BinkGetSummary                                       = 0
 BinkNextFrame                                        = 0
@@ -45,8 +45,8 @@ CDirectSoundStream_SetMixBinVolumes                  = 0x4A0416
 CDirectSoundStream_SetPosition                       = 0
 CDirectSoundStream_SetVelocity                       = 0
 CDirectSoundStream_SetVolume                         = 0x4A0372
-closesocket                                          = 0
-connect                                              = 0
+closesocket                                          = 0x419264
+connect                                              = 0x4192B9
 crt_acos                                             = 0x3E78FD
 crt_asin                                             = 0x3E79C9
 crt_atan                                             = 0
@@ -167,8 +167,8 @@ DirectSoundCreateStream                              = 0x4A2127
 DirectSoundDoWork                                    = 0x4A0552
 DirectSoundUseFullHRTF                               = 0x49F662
 DirectSoundUseLightHRTF                              = 0
-getsockname                                          = 0
-getsockopt                                           = 0
+getsockname                                          = 0x4192A3
+getsockopt                                           = 0x419294
 IDirectSound_CommitDeferredSettings                  = 0x4A1961
 IDirectSound_CommitEffectData                        = 0
 IDirectSound_CreateSoundBuffer                       = 0x4A1DFA
@@ -218,25 +218,25 @@ IDirectSoundBuffer_Stop                              = 0x4A04F2
 IDirectSoundBuffer_StopEx                            = 0
 IDirectSoundBuffer_Unlock                            = 0
 IDirectSoundStream_SetEG                             = 0
-ioctlsocket                                          = 0
-listen                                               = 0
+ioctlsocket                                          = 0x41927A
+listen                                               = 0x4192C4
 Lock2DSurface                                        = 0x4587D0
-recv                                                 = 0
+recv                                                 = 0x419303
 recvfrom                                             = 0x41931D
-select                                               = 0
-send                                                 = 0
+select                                               = 0x4192DA
+send                                                 = 0x41932C
 sendto                                               = 0x419346
-setsockopt                                           = 0
-shutdown                                             = 0
-socket                                               = 0
-WSACancelOverlappedIO                                = 0
-WSAGetLastError                                      = 0
-WSAGetOverlappedResult                               = 0
-WSARecv                                              = 0
+setsockopt                                           = 0x419285
+shutdown                                             = 0x41926F
+socket                                               = 0x419259
+WSACancelOverlappedIO                                = 0x4192F8
+WSAGetLastError                                      = 0x419735
+WSAGetOverlappedResult                               = 0x4192E9
+WSARecv                                              = 0x41930E
 WSARecvFrom                                          = 0
-WSASend                                              = 0
-WSASendTo                                            = 0
-WSAStartup                                           = 0
+WSASend                                              = 0x419337
+WSASendTo                                            = 0x419355
+WSAStartup                                           = 0x4195B7
 XAudioDownloadEffectsImage                           = 0x4A057B
 XInitDevices                                         = 0x4BE0EF
 XInputClose                                          = 0x4BECEE
@@ -252,9 +252,9 @@ XNetGetEthernetLinkStatus                            = 0x33C601
 XNetGetTitleXnAddr                                   = 0x41924E
 XNetInAddrToXnAddr                                   = 0
 XNetRandom                                           = 0x4191CF
-XNetRegisterKey                                      = 0
-XNetStartup                                          = 0
-XNetUnregisterKey                                    = 0
+XNetRegisterKey                                      = 0x4191E5
+XNetStartup                                          = 0x4195A0
+XNetUnregisterKey                                    = 0x4191F0
 XNetXnAddrToInAddr                                   = 0x4191FB
 XOnlineCleanup                                       = 0
 XOnlineStartup                                       = 0x42C426
@@ -28942,6 +28942,25 @@ call = "SG1_LipsyncKeep"
 at = 0x004A6579
 call = "SG1_SkipPurecall"
 on_true = 0x004A657C
+
+# co-op look up/down of other players (src/game/hooks.cpp), ported from recomp_0027_remote_player_look
+[[hook]]
+at = 0x001A27D6
+call = "SG1_LookDownMark"
+
+[[hook]]
+at = 0x001A2C4A
+call = "SG1_LookUseViewPitch"
+on_true = 0x001A2C22
+
+[[hook]]
+at = 0x001A2C38
+call = "SG1_LookSmoothPitch"
+
+# co-op: lip-sync of other players' voice lines (src/game/hooks.cpp)
+[[hook]]
+at = 0x0020C75A
+call = "SG1_ClientVoiceLip"
 
 # setjmp resume points (src/game/nonlocal.cpp): longjmp lands here
 [[function]]

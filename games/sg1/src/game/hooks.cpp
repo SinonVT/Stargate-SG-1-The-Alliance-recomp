@@ -85,3 +85,85 @@ X86_HOST_API bool SG1_SkipPurecall(X86Context& ctx, uint8_t* base) {
     }
     return false;
 }
+
+// ---- co-op: look up / down of other players (ported from recomp_0027_remote_player_look) ----
+// UpdateTwistLook (0x1A27D0, thiscall, this = pawn). The co-op script marks a downed / knocked-back remote player
+// with LookTargetActor (+0x7B0) == Level (+0xA0). Treat it like the host's own pawn: clear the look target (the script
+// sets the mark again every frame) and remember that it was marked, so the look pitch comes from the replicated ViewPitch.
+static bool g_sg1_downmark = false;
+X86_HOST_API void SG1_LookDownMark(X86Context& ctx, uint8_t* base) {   // before 0x1A27D6, esi = pawn
+    (void)base;
+    g_sg1_downmark = false;
+    uint32_t lta = kernel::R32(ctx.esi + 0x7B0);
+    if (lta != 0 && lta == kernel::R32(ctx.esi + 0xA0)) {
+        kernel::W32(ctx.esi + 0x7B0, 0);
+        g_sg1_downmark = true;
+    }
+}
+
+// UpdateTwistLook only follows the real view pitch when the pawn has a Controller (branch at 0x1A2C22). On a client other
+// players' pawns have none, so their look up / down never showed. The co-op script marks such a pawn with
+// LookTargetActor == itself; take the Controller branch for it (and for a marked downed pawn): look = ViewPitch, which
+// the server replicates. Runs before 0x1A2C4A (the no-Controller branch); true jumps to 0x1A2C22.
+X86_HOST_API bool SG1_LookUseViewPitch(X86Context& ctx, uint8_t* base) {
+    (void)base;
+    if (kernel::R32(ctx.esi + 0x7B0) == ctx.esi) return true;
+    return g_sg1_downmark;
+}
+
+// Smooth the replicated look pitch of other players' pawns (jitter fix).
+// Runs at 0x001A2C38 in UpdateTwistLook, eax = signed pitch from ViewPitch.
+#include <unordered_map>
+X86_HOST_API void SG1_LookSmoothPitch(X86Context& ctx, uint8_t* base) {
+    (void)base;
+    static std::unordered_map<uint32_t, float> s_pitch;
+    int32_t target = (int32_t)ctx.eax;
+    auto it = s_pitch.find(ctx.esi);
+    if (it == s_pitch.end() || target - it->second > 6000.f || it->second - target > 6000.f) {
+        s_pitch[ctx.esi] = (float)target;
+        return;
+    }
+    it->second += ((float)target - it->second) * 0.25f;
+    ctx.eax = (uint32_t)(int32_t)it->second;
+}
+
+// ---- co-op: mouth of other players' characters while they speak (taunts etc.) ----
+// The voice pack plays the sound on the server and starts the lip-sync animation there only; a client just gets the sound
+// (APlayerController::execClientHearSound, 0x20C620) and the remote pawn's mouth stays shut. After the client has decided to
+// play the sound (0x20C75A: [esp+0x10] = actor, [esp+0x44] = sound) start the lip-sync of a pawn that nobody on this machine
+// controls, if it has an animation named like the sound. Uses the engine's own execHasLIPSincAnim (0x211470) and
+// execPlayLIPSincAnim (0x211210) with a small fake script frame built below the stack.
+namespace {
+uint32_t RunLipExec(X86Context& ctx, uint32_t fn, uint32_t actor, uint32_t nameIdx, bool withOptionals, uint32_t scratch) {
+    using namespace kernel;
+    uint32_t frame = scratch, code = scratch + 0x40, result = scratch + 0x30;
+    for (uint32_t i = 0; i < 0x60; i += 4) W32(scratch + i, 0);
+    uint32_t p = code;
+    G<uint8_t>(p++) = 0x21;                                    // EX_NameConst
+    W32(p, nameIdx); p += 4;
+    if (withOptionals) for (int i = 0; i < 3; i++) G<uint8_t>(p++) = 0x0B;   // EX_Nothing: default volume / radius / pitch
+    G<uint8_t>(p++) = 0x16;                                    // EX_EndFunctionParms
+    G<uint8_t>(p++) = 0x04;
+    W32(frame + 0x08, actor);                                  // FFrame::Object
+    W32(frame + 0x0C, code);                                   // FFrame::Code
+    ctx.ecx = actor;
+    CallGuest(ctx, fn, {frame, result});
+    return R32(result);
+}
+}
+
+X86_HOST_API void SG1_ClientVoiceLip(X86Context& ctx, uint8_t* base) {
+    (void)base;
+    using namespace kernel;
+    uint32_t actor = R32(ctx.esp + 0x10), snd = R32(ctx.esp + 0x44);
+    if (!actor || !snd) return;
+    if (R32(actor + 0xC0) == 0) return;          // no lip-sync component
+    if (R32(actor + 0x390) != 0) return;         // a pawn controlled on this machine does its own
+    uint32_t nameIdx = R32(snd + 0x20);
+    X86Context save = ctx;
+    uint32_t scratch = (ctx.esp - 0x200) & ~15u;
+    ctx.esp = scratch;
+    if (RunLipExec(ctx, 0x00211470u, actor, nameIdx, false, scratch) & 1)
+        RunLipExec(ctx, 0x00211210u, actor, nameIdx, true, scratch);
+    ctx = save;
+}
