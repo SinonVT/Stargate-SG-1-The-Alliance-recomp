@@ -1176,8 +1176,16 @@ STREAM(GetInfo, 2) {
     W32(info + 12, 0);
     return 0;
 }
+// DSSTREAMSTATUS: READY (takes a packet), PLAYING, PAUSED, STARVED (every packet played). A title waits for STARVED at
+// the end of a file before it reports the stream finished: SG1's dialogue thread polls it after the last packet, and
+// without it every cutscene stopped after its first line (no further voices or subtitles).
+constexpr uint32_t kStreamReady = 0x1, kStreamPlaying = 0x10000, kStreamPaused = 0x20000, kStreamStarved = 0x40000;
 STREAM(GetStatus, 2) {
-    W32(a[1], v.packets.size() < v.max_packets ? 1u : 0u);  // XMEDIASTATUS_ACCEPT_INPUT
+    uint32_t st = 0;
+    if (v.packets.size() < v.max_packets) st |= kStreamReady;
+    if (v.packets.empty()) st |= kStreamStarved;
+    else st |= v.paused ? kStreamPaused : kStreamPlaying;
+    W32(a[1], st);
     return 0;
 }
 STREAM(Process, 3) {
