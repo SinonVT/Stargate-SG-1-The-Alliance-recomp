@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -28,7 +29,10 @@
 #include <mutex>
 #include <string>
 
+#include "imgui.h"
+
 #include "app/app.h"
+#include "core/input.h"
 #include "core/log.h"
 #include "cpu/x86_ops.h"
 #include "game/sg1_input.h"
@@ -42,10 +46,12 @@ uint32_t g_opt_menu_x100 = 100;
 bool g_opt_invert_y = false;
 uint32_t g_opt_fov = 0;
 bool g_opt_hor_plus = true;
-bool g_opt_fill = true;
+bool g_opt_fill = false;
+bool g_opt_no_controllers = false;
 bool g_opt_maximized = false;
 
 std::atomic<bool> g_overlay{false};
+std::atomic<int> g_overlay_page{0};
 std::atomic<bool> g_voice{false};
 std::atomic<int> g_voice_sel{0};
 std::atomic<bool> g_in_menu{false};
@@ -80,9 +86,13 @@ bool g_active = false;
 HWND g_hwnd = nullptr;
 int g_last_down_vk = 0;
 bool g_typing = false;        // chat or console line open: V and the rest are letters
+// Esc and Tab as the controller's Start and Back (the pause and objectives screens open on those buttons only):
+// held while the key is down, and for at least kPadTapMs so a quick tap is not missed between two polls
+constexpr uint32_t kPadTapMs = 100;
+std::atomic<bool> g_pad_start_held{false}, g_pad_back_held{false};
+std::atomic<uint32_t> g_pad_start_until{0}, g_pad_back_until{0};
 bool g_lb_suppress = false;   // the voice menu took a left press: its release stays away from the game too
-std::string g_cmd;            // console command waiting to be typed
-bool g_cmd_pending = false;
+std::deque<std::string> g_cmds;  // console commands waiting to be typed, one after another
 
 std::atomic<uint32_t> g_menu_tick{0};
 std::atomic<uint32_t> g_gui{0};   // the GUI controller, this of its InputEvent (0x2FD640)
@@ -138,14 +148,31 @@ void SetOverlay(bool on) {
     if (g_hwnd) PostMessageW(g_hwnd, kMsgCapture, 0, 0);
 }
 
+
+// Port 1 always has a controller in it: the keyboard and mouse player's. The game opens player 1's pause and mission
+// screens only while a controller is in port 1, so with none plugged in (or controllers switched off in the Insert
+// menu) Esc and Tab did nothing. A real controller there works as before.
+// While the Insert settings or Del spawner window is open, a controller does nothing in the game behind it either.
+void OnPad(int port, input::Pad& pad) {
+    if (port == 0) {
+        pad.connected = true;
+        uint32_t now = GetTickCount();
+        if (g_pad_start_held.load() || int32_t(g_pad_start_until.load() - now) > 0) pad.buttons |= 0x10;  // Start
+        if (g_pad_back_held.load() || int32_t(g_pad_back_until.load() - now) > 0) pad.buttons |= 0x20;    // Back
+    }
+    if (!g_overlay.load()) return;
+    bool connected = pad.connected;
+    pad = input::Pad{};
+    pad.connected = connected;  // stays plugged in, only idle
+}
+
 void SaveSettings() {
     if (g_hwnd) PostMessageW(g_hwnd, kMsgSave, 0, 0);
 }
 
 void TypeCommand(const char* cmd) {
     std::lock_guard<std::mutex> l(g_lock);
-    g_cmd = cmd;
-    g_cmd_pending = true;
+    g_cmds.emplace_back(cmd);
 }
 
 // the FOV the game should have: the menu's (75, the game's own, when unset), widened for a wide window (Hor+: the
@@ -194,6 +221,9 @@ void OnWindow(void* hwnd) {
     if (g_opt_sens_x10 < 1) g_opt_sens_x10 = 500;
     if (g_opt_menu_x100 < 10) g_opt_menu_x100 = 100;
     gpu::g_fill_window = g_opt_fill;
+    input::SetEnabled(!g_opt_no_controllers);
+    // the port's menus (Insert settings, Del spawner) are keyboard and mouse only: no controller navigation
+    if (ImGui::GetCurrentContext()) ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
     TexpackInit();
     RAWINPUTDEVICE rid{};
     rid.usUsagePage = 0x01;
@@ -242,6 +272,23 @@ bool OnMessage(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* re
         }
         ApplyCapture();
         break;
+    case WM_EXITSIZEMOVE:
+        // a windowed window resized by its edges keeps that size: it becomes the resolution setting, which the next
+        // start opens the window at (maximized is kept apart, in window_maximized)
+        if (app::Get().display_mode == app::DisplayMode::Windowed && !IsZoomed(g_hwnd) && !IsIconic(g_hwnd)) {
+            RECT c{};
+            GetClientRect(g_hwnd, &c);
+            uint32_t w = uint32_t(c.right - c.left), h = uint32_t(c.bottom - c.top);
+            app::Settings& s = app::Get();
+            app::Mode out = app::Output();
+            if (w >= 320 && h >= 240 && (w != out.width || h != out.height)) {
+                s.width = w;
+                s.height = h;
+                LOGI("kbm: window resized to %ux%u, saved", w, h);
+                SaveSettings();
+            }
+        }
+        break;
     case WM_MOVE:
         ApplyCapture();
         break;
@@ -249,15 +296,32 @@ bool OnMessage(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* re
     case WM_SYSKEYDOWN: {
         int vk = int(wp);
         bool rep = (lp & (1 << 30)) != 0;
-        if (vk == VK_INSERT && !rep) { SetOverlay(!overlay); return false; }
+        if (vk == VK_INSERT && !rep) {
+            if (overlay && g_overlay_page.load() != kPageSettings) { g_overlay_page = kPageSettings; return false; }
+            g_overlay_page = kPageSettings;
+            SetOverlay(!overlay);
+            return false;
+        }
+        // Del: the NPC spawner, as in the old build
+        if (vk == VK_DELETE && !rep) {
+            if (overlay && g_overlay_page.load() == kPageSpawner) { SetOverlay(false); return false; }
+            g_overlay_page = kPageSpawner;
+            if (!overlay) SetOverlay(true);
+            return false;
+        }
         if (overlay) {
             if (vk == VK_ESCAPE && !rep) SetOverlay(false);
             return false;           // the settings menu has the keyboard
         }
         if (vk == VK_F9 && !rep) { g_capture = !g_capture; ApplyCapture(); return false; }
-        if (vk == VK_PRIOR && !rep) { g_opt_sens_x10 = uint32_t(g_opt_sens_x10 * 1.25f + 0.5f); LOGI("kbm: mouse sensitivity %.1f", Sens()); SaveSettings(); }
+        if (vk == VK_PRIOR && !rep) { g_opt_sens_x10 = std::min<uint32_t>(5000, uint32_t(g_opt_sens_x10 * 1.25f + 0.5f)); LOGI("kbm: mouse sensitivity %.1f", Sens()); SaveSettings(); }
         if (vk == VK_NEXT && !rep && g_opt_sens_x10 > 1) { g_opt_sens_x10 = uint32_t(g_opt_sens_x10 / 1.25f + 0.5f); LOGI("kbm: mouse sensitivity %.1f", Sens()); SaveSettings(); }
         bool menu = g_in_menu.load();
+        // Esc in play = Start (pause menu); in a game menu it stays Esc (back). Tab = Back (objectives), in menus too.
+        if (!rep && !g_typing && g_active) {
+            if (vk == VK_ESCAPE && !menu) { g_pad_start_held = true; g_pad_start_until = GetTickCount() + kPadTapMs; return false; }
+            if (vk == VK_TAB) { g_pad_back_held = true; g_pad_back_until = GetTickCount() + kPadTapMs; return false; }
+        }
         if (!rep && !menu) {
             if (vk == 'V' && !g_typing) {   // the voice menu instead of CallForHelp
                 bool v = !g_voice.load();
@@ -279,7 +343,9 @@ bool OnMessage(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* re
     case WM_SYSKEYUP: {
         int vk = int(wp);
         if (vk == VK_OEM_3) vk = VK_NUMPAD7;
-        if (vk == 'V' || vk == VK_INSERT) break;
+        if (vk == VK_ESCAPE) g_pad_start_held = false;
+        if (vk == VK_TAB) { g_pad_back_held = false; break; }
+        if (vk == 'V' || vk == VK_INSERT || vk == VK_DELETE) break;
         Push(vk, kRelease);     // releases go through even with the settings menu up
         if (msg == WM_SYSKEYUP && (vk == VK_MENU || vk == VK_F10)) { *result = 0; return true; }
         break;
@@ -386,6 +452,9 @@ void MenuFrame(X86Context& ctx, uint32_t gui, long mx, long my, int lb, int rb) 
     place();
 }
 
+// UE2 EInputKey for the controller's A and B (IK_Joy1, IK_Joy2), which the menus turn into XC_A / XC_B
+constexpr int kIkJoyA = 0xC8, kIkJoyB = 0xC9;
+
 int CharVk(unsigned c) {
     if (c >= 'a' && c <= 'z') return int(c - 32);
     if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return int(c);
@@ -397,6 +466,10 @@ int CharVk(unsigned c) {
     case '/': case '?': return 0xBF;
     case '\\': return 0xDC;
     case '\'': return 0xDE;
+    case '(': return '9';
+    case ')': return '0';
+    case '_': return 0xBD;
+    case ',': return 0xBC;
     default: return 0x20;
     }
 }
@@ -441,15 +514,16 @@ X86_FUNC(sub_0032D370) {
             std::lock_guard<std::mutex> l(g_lock);
             evs.swap(g_q);
             mx = g_mx; my = g_my; g_mx = g_my = 0;
-            if (g_cmd_pending && type_stage < 0) { type_cmd = g_cmd; g_cmd_pending = false; type_stage = 0; }
+            if (!g_cmds.empty() && type_stage < 0) { type_cmd = g_cmds.front(); g_cmds.pop_front(); type_stage = 0; }
         }
         busy = true;
         uint32_t keep_ecx = ctx.ecx, keep_eax = ctx.eax, keep_edx = ctx.edx;
+        // the engine's InputEvent: true when something used the key
         auto input = [&](int vk, int action, float delta = 0.0f) {
             uint32_t fb;
             std::memcpy(&fb, &delta, 4);
             ctx.ecx = engine;
-            kernel::CallGuest(ctx, 0x00120D10u, {view, uint32_t(vk), uint32_t(action), fb});
+            return (kernel::CallGuest(ctx, 0x00120D10u, {view, uint32_t(vk), uint32_t(action), fb}) & 0xFF) != 0;
         };
         auto key = [&](int vk, int ch) {
             ctx.ecx = engine;
@@ -481,6 +555,14 @@ X86_FUNC(sub_0032D370) {
         for (const Ev& e : evs) {
             if (menu_mouse && (e.vk == VK_LBUTTON || e.vk == VK_RBUTTON) && e.action) {
                 if (e.action != kRepeat) (e.vk == VK_LBUTTON ? lb : rb) = e.action == kPress;
+                continue;
+            }
+            // The Stargate menu pages are driven by controller buttons (A select, B back; the profile select and the
+            // on-screen keyboard listen for nothing else), so in a game menu Enter is the controller's A and Backspace
+            // its B, given to the menu controller directly as the right mouse button's B is
+            if (menu_mouse && (e.vk == VK_RETURN || e.vk == VK_BACK) && e.action) {
+                if (e.action == kPress || e.action == kRelease)
+                    GuiEvent(ctx, gui, e.vk == VK_RETURN ? kIkJoyA : kIkJoyB, e.action, 0.0f);
                 continue;
             }
             if (e.action) input(e.vk, e.action);

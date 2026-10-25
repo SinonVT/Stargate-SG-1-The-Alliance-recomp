@@ -2,6 +2,7 @@
 #include "core/input.h"
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 #include <mutex>
 #include <utility>
@@ -19,6 +20,7 @@ namespace {
 std::mutex g_lock;
 bool g_sdl = false;
 SDL_Gamepad* g_pads[4] = {};
+std::atomic<bool> g_enabled{true};
 
 void AddPad(SDL_JoystickID id) {
     for (SDL_Gamepad* pad : g_pads)
@@ -85,7 +87,7 @@ Pad Poll(int port) {
     {
         std::lock_guard lock(g_lock);
         UpdatePads();
-        if (SDL_Gamepad* pad = port >= 0 && port < 4 ? g_pads[port] : nullptr) {
+        if (SDL_Gamepad* pad = g_enabled && port >= 0 && port < 4 ? g_pads[port] : nullptr) {
             p.connected = true;
             constexpr SDL_GamepadButton kButtons[] = {
                 SDL_GAMEPAD_BUTTON_DPAD_UP,   SDL_GAMEPAD_BUTTON_DPAD_DOWN,  SDL_GAMEPAD_BUTTON_DPAD_LEFT,
@@ -117,6 +119,7 @@ uint16_t HeldOnAnyController() {
     constexpr std::pair<SDL_GamepadButton, uint16_t> kFaceButtons[] = {
         {SDL_GAMEPAD_BUTTON_SOUTH, 0x1000}, {SDL_GAMEPAD_BUTTON_EAST, 0x2000},
         {SDL_GAMEPAD_BUTTON_WEST, 0x4000},  {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
+    if (!g_enabled) return 0;
     std::lock_guard lock(g_lock);
     UpdatePads();
     uint16_t held = 0;
@@ -130,7 +133,16 @@ uint16_t HeldOnAnyController() {
 void Rumble(int port, uint16_t left, uint16_t right) {
     if (app::kGame.rumble) app::kGame.rumble(port, left, right);
     std::lock_guard lock(g_lock);
-    if (port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);
+    if (g_enabled && port >= 0 && port < 4 && g_pads[port]) SDL_RumbleGamepad(g_pads[port], left, right, 0);
+}
+
+void SetEnabled(bool on) {
+    if (g_enabled.exchange(on) == on) return;
+    LOGI("input: controllers %s", on ? "on" : "off");
+    std::lock_guard lock(g_lock);
+    if (on) return;
+    for (SDL_Gamepad* pad : g_pads)
+        if (pad) SDL_RumbleGamepad(pad, 0, 0, 0);  // a motor left running stops
 }
 
 }  // namespace input

@@ -16,5 +16,7 @@ uint16_t HeldOnAnyController();  // face buttons as XINPUT_GAMEPAD_A/B/X/Y masks
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
 void Rumble(int port, uint16_t left, uint16_t right);
+// off: controllers are ignored (no pad reaches the game, no rumble); the keyboard and mouse still work
+void SetEnabled(bool on);
 
 }  // namespace input

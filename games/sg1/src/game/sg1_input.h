@@ -13,8 +13,11 @@ extern bool g_opt_invert_y;
 extern uint32_t g_opt_fov;          // 0 = leave the game's own
 extern bool g_opt_hor_plus;         // widen the FOV for a wide window so the vertical view stays as at 4:3
 extern bool g_opt_fill;             // the 3D view fills the window at its own aspect (16:9, ultrawide)
+extern bool g_opt_no_controllers;   // controllers ignored (input::SetEnabled)
 
 extern std::atomic<bool> g_overlay;     // Insert settings menu: the game gets no keyboard or mouse
+constexpr int kPageSettings = 0, kPageSpawner = 1;
+extern std::atomic<int> g_overlay_page;  // which window the overlay shows: Insert settings or the Del NPC spawner
 extern std::atomic<bool> g_voice;       // V voice menu
 extern std::atomic<int> g_voice_sel;
 extern std::atomic<bool> g_in_menu;     // a game (GUI) menu is on screen

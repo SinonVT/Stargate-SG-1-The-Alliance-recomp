@@ -94,12 +94,13 @@ Textures load in the background, so one can sharpen a moment after it first appe
 **Your own textures.** Put a PNG in `texpack\custom` with the same file name as one in `texpack\hd`. You can also name it after the texture's ID, `f<format>_<width>x<height>_<hash>.png`, which also works for textures the pack does not cover. Files in `custom` win over the pack while "Custom textures" is on in the Insert menu (it is on by default). Delete a file to go back. `texpack\upscale_dump.bat` runs Real-ESRGAN over the whole `hd` folder into `custom`, if you have it.
 
 ## Widescreen / ultrawide
-With "Fill the window" on (the default), the 3D view is drawn for the window's shape at any aspect: 16:9, 21:9, 32:9. The game has no widescreen support of its own, so the port widens the field of view (Hor+: the vertical view stays what 4:3 gave). It also widens the gun, the hands and the HUD to match. The FOV is typed into the game's console about 3 seconds after you are in a level with no menu up, and again when the window changes shape; the game saves it in `System\User.ini`. Menus, videos and 2D are stretched to the window. Turn "Fill the window" off for the original 4:3 picture.
+Turn on "Fill the window" in the Insert menu (it is off by default, which keeps the original 4:3 picture). With it on, the 3D view is drawn for the window's shape at any aspect: 16:9, 21:9, 32:9. The game has no widescreen support of its own, so the port widens the field of view (Hor+: the vertical view stays what 4:3 gave). It also widens the gun, the hands and the HUD to match. The FOV is typed into the game's console about 3 seconds after you are in a level with no menu up, and again when the window changes shape; the game saves it in `System\User.ini`. Menus, videos and 2D are stretched to the window.
 
 ## In-game settings (Insert)
 Insert (or Esc) opens and closes the settings menu. The game gets no keyboard or mouse while it is open. Settings are saved to `out\build\release\settings.toml`.
 - **Mouse:** look sensitivity (default 50, PgUp/PgDn change it in game), menu cursor speed, invert Y.
-- **Widescreen / field of view:** fill the window, FOV at 4:3 (default 75), Hor+, "Apply now".
+- **Controllers:** "Detect controllers" (on by default); turn it off to ignore any connected controller and play on keyboard and mouse only.
+- **Widescreen / field of view:** fill the window (off by default), FOV at 4:3 (default 75), Hor+, "Apply now".
 - **Textures:** HD texture pack, custom textures, Extract HD textures, Reload textures.
 - **Display:**
   - display mode (Windowed, Borderless or Fullscreen; the first start is Windowed)
@@ -108,7 +109,7 @@ Insert (or Esc) opens and closes the settings menu. The game gets no keyboard or
   - FPS cap and VSync
   - anisotropic filtering
 
-  A maximized window stays maximized, also across "Exit to main menu", which restarts the game.
+  A maximized window stays maximized, also across "Exit to main menu", which restarts the game. A window you resize by dragging its edges keeps that size the next time you start the game.
 
 ## Voice commands (V)
 In a match, V opens the voice menu: the mouse wheel picks a line and left click says it (the click does not fire). V again or Esc closes it. Each line presses a key whose `User.ini` binding is `Taunt <MSGID>` (NumPad0-9 and F13-F18, set by `controls_preset.py`); you can bind those keys yourself too. The lines are only the ones all four SG-1 voice packs have: taunt, OK, negative, ready, enemy spotted, take cover, enemy killed, area clear, under fire, team under fire, man down, in cover, holding fire, firing, friendly fire.
@@ -130,6 +131,7 @@ In a match the keyboard and mouse go to the game through its own bindings in `Sy
 | Third person | B |
 | Cloak | CapsLock |
 | Mission information | Tab |
+| Pause menu | Esc |
 | Chat / team chat | T / Y |
 
 Team commands: **Q = Concentrate Fire** (hold it, look at a squad mate or an enemy, release) and **E = Take Cover**. They need a squad, so they do nothing in deathmatch.
@@ -142,6 +144,7 @@ Port keys:
 |---|---|
 | Insert | Opens and closes the settings menu |
 | V | Opens and closes the voice menu |
+| Delete | Opens and closes the NPC spawner (summons Jaffa, Haaken, Goa'uld, Replicators, Pteros; AI switch on top) |
 | ` (backtick) | Opens the game console |
 | F9 | Frees or captures the mouse |
 | PgUp / PgDn | Mouse sensitivity |

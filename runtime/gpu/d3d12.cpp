@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -23,6 +24,8 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <string>
+#include <vector>
 
 #include <imgui.h>
 #include <backends/imgui_impl_dx12.h>
@@ -529,7 +532,7 @@ private:
     void CaptureShaders(const State& s, const Assembled& a, const DrawShaders& sh, const PixelKey& pk);
     void CaptureShader(const char* kind, uint64_t key, const std::string& src);
     void SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages);
-    uint32_t EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp);
+    uint32_t EnsureStageSamplers(const State& s, const DrawTextures& stages, uint32_t clamp);
     void SetViewportScissor(const State& s, uint32_t gw);
     void SetBlendFactorStencilRef(const State& s);
     void DrawGeometry(const Assembled& a);
@@ -714,6 +717,7 @@ private:
     std::mutex late_lock_;                      // DeliverLate runs on the title's thread
     std::atomic<uint64_t> presents_seen_{0};    // presents_ for DeliverLate
     Assembled asm_;  // kept between draws for its buffers
+    uint64_t last_draw_sig_ = 0;  // RepeatedLightPass: the previous draw
     // visibility tests: an occlusion query per counted draw, summed into report memory once the GPU is done
     struct Query {
         uint32_t index;
@@ -1328,6 +1332,46 @@ void D3D12Backend::Blit(ID3D12Resource* src, DXGI_FORMAT fmt, const float uvrect
     DrawFullScreen(EnsureBlitPipeline(o.rtv, o.over), cb.gpu, slot, si);
 }
 
+// the disk shader cache: shadercache\<hash>.cso beside the executable. The file name carries the compiler options and
+// a format version, so a change to either leaves old files unused.
+namespace fs = std::filesystem;
+constexpr uint32_t kShaderCacheVersion = 1;
+fs::path ShaderCachePath(uint64_t hash) {
+    static const fs::path dir = [] {
+        std::error_code ec;
+        fs::path d = app::ExeDir() / "shadercache";
+        fs::create_directories(d, ec);
+        return ec ? fs::path() : d;
+    }();
+    if (dir.empty()) return {};
+    char name[64];
+    std::snprintf(name, sizeof name, "%016llx_o1_v%u.cso", (unsigned long long)hash, kShaderCacheVersion);
+    return dir / name;
+}
+bool LoadShaderBlob(const fs::path& path, ComPtr<ID3DBlob>& out) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    bool ok = n > 0 && SUCCEEDED(D3DCreateBlob(SIZE_T(n), &out)) && std::fread(out->GetBufferPointer(), 1, size_t(n), f) == size_t(n);
+    std::fclose(f);
+    if (!ok) out.Reset();
+    return ok;
+}
+void SaveShaderBlob(const fs::path& path, ID3DBlob* blob) {
+    // written beside, then renamed: a start that ends mid-write leaves no half file
+    fs::path tmp = path;
+    tmp += L".tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (!f) return;
+    bool ok = std::fwrite(blob->GetBufferPointer(), 1, blob->GetBufferSize(), f) == blob->GetBufferSize();
+    std::fclose(f);
+    std::error_code ec;
+    if (ok) fs::rename(tmp, path, ec);
+    if (!ok || ec) fs::remove(tmp, ec);
+}
+
 ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash) {
     // one source can hold several entry points
     uint64_t profile_seed = Hash(profile, std::strlen(profile));
@@ -1337,6 +1381,13 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     if (it != blobs_.end()) return it->second.Get();
     ComPtr<ID3DBlob> code;
     ComPtr<ID3DBlob> err;
+    // compiled shaders are kept on disk beside the executable, so an effect compiles once, not once per start (a
+    // compile is tens of milliseconds: a hitch in play, which also turns mouse movement made during it into a jump)
+    fs::path cached = ShaderCachePath(hash);
+    if (!cached.empty() && LoadShaderBlob(cached, code)) {
+        blobs_[hash] = code;
+        return code.Get();
+    }
     PerfScope perf_compile{g_perf.compile};
     g_perf.shaders++;
     HRESULT hr = D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, entry, profile,
@@ -1347,6 +1398,7 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
         blobs_[hash] = nullptr;
         return nullptr;
     }
+    if (!cached.empty()) SaveShaderBlob(cached, code.Get());
     blobs_[hash] = code;
     return code.Get();
 }
@@ -1900,9 +1952,16 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, const DrawTextures& stage
     sd.AddressU = Address(clamp && t[kTssAddressU] == kTaddressWrap ? kTaddressClamp : t[kTssAddressU]);
     sd.AddressV = Address(clamp && t[kTssAddressV] == kTaddressWrap ? kTaddressClamp : t[kTssAddressV]);
     sd.AddressW = Address(t[kTssAddressW]);
-    sd.MipLODBias = Bits(t[kTssMipLodBias]);
-    sd.MinLOD = float(t[kTssMaxMipLevel]);
+    sd.MipLODBias = g_dbg_ignore_lod_bias.load() ? 0.0f : Bits(t[kTssMipLodBias]);
+    sd.MinLOD = g_dbg_ignore_max_mip.load() ? 0.0f : float(t[kTssMaxMipLevel]);
+    if (g_dbg_lod_bias_add.load() != 0.0f) sd.MipLODBias += g_dbg_lod_bias_add.load();
     sd.MaxLOD = mip ? D3D12_FLOAT32_MAX : sd.MinLOD;
+    if (int m = g_dbg_samp_mode.load()) {
+        // debug: 1 only the sharpest level, 2 trilinear with the game's filters ignored, 3 anisotropic 16x
+        if (m == 1) { sd.MinLOD = 0; sd.MaxLOD = 0; }
+        if (m == 2) { sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR; sd.MaxAnisotropy = 1; }
+        if (m == 3) { sd.Filter = D3D12_FILTER_ANISOTROPIC; sd.MaxAnisotropy = 16; }
+    }
     Color(t[kTssBorderColor], sd.BorderColor);
     if (stages.info[i].shadow) {
         // the console tests texel OP r, D3D12 tests r OP texel
@@ -1915,10 +1974,10 @@ D3D12_SAMPLER_DESC StageSampler(const State& s, int i, const DrawTextures& stage
     return sd;
 }
 
-uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp) {
+uint32_t D3D12Backend::EnsureStageSamplers(const State& s, const DrawTextures& stages, uint32_t clamp) {
     D3D12_SAMPLER_DESC sd[4];
     uint32_t aniso = app::Get().aniso;
-    for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages, clamp, aniso);
+    for (int i = 0; i < 4; i++) sd[i] = StageSampler(s, i, stages, ((clamp >> i) & 1) != 0, aniso);
     uint64_t key = Hash(sd, sizeof(sd));
     auto it = samplers_.find(key);
     if (it != samplers_.end()) return it->second;
@@ -2032,6 +2091,7 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
     if (k.zen) {
         k.zwrite = SimpleState(s, kMZWriteEnable) != 0;
         k.zfunc = SimpleState(s, kMZFunc);
+        if (g_dbg_layer_z_always.load() && !k.zwrite && (k.zfunc == 0x203 || k.zfunc == 0x202)) k.zfunc = 0x207;  // debug
     }
     k.sten = s.rs[kRsStencilEnable] != 0;
     if (k.sten) {
@@ -2260,9 +2320,13 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
     Color(s.rs[kRsAmbient], c.amb);
     // lights to view space
     const float* vm = s.transforms[kTsView].data();
+    if (!fk.types) return;
+    uint32_t types = LightTypes(s);
     for (int i = 0; i < 8; i++) {
-        if (!((fk.types >> (i * 2)) & 3)) continue;
+        uint32_t type = (types >> (i * 2)) & 3;
+        if (!type) continue;
         LightToView(s.lights[size_t(i)], vm, c.lt[i]);
+        c.lt[i][6][2] = float(type);  // the shader's loop reads the slot's type here (0 = off)
     }
 }
 
@@ -2275,6 +2339,8 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
     if (k.topo == uint32_t(Topology::Points)) c.surf[3] = TargetScale();
     FillFogConstants(s, sh.prog, c);
+    if (g_dbg_no_fog.load()) c.fog[3] = 0.0f;
+    if (g_dbg_black_fog_blend.load() && k.blend) c.fog_color[0] = c.fog_color[1] = c.fog_color[2] = 0.0f;
     FillCombinerConstants(s, c);
     if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, bound_rt_, k.blend ? k.src : 1);
     FillTextureConstants(s, sh, stages, c);
@@ -2320,6 +2386,19 @@ void D3D12Backend::CaptureInputs(const State& s, const Assembled& a, const DrawC
         for (uint32_t k = 0; k < n * 4; k++) fprintf(cap_, " %g", a.vertices[v * n * 4 + k]);
         fprintf(cap_, " ]");
     }
+    if ((a.regs >> 3) & 1 && n) {
+        uint32_t slot = 0;
+        for (int r = 0; r < 3; r++) slot += (a.regs >> r) & 1;
+        size_t nv = a.vertices.size() / (n * 4);
+        double sum[3] = {0, 0, 0}, mx = 0;
+        for (size_t v = 0; v < nv; v++)
+            for (int k = 0; k < 3; k++) {
+                float x = a.vertices[v * n * 4 + slot * 4 + k];
+                sum[k] += x;
+                if (x > mx) mx = x;
+            }
+        if (nv) fprintf(cap_, "\n     v3mean %.3f %.3f %.3f max %.3f of %zu", sum[0] / nv, sum[1] / nv, sum[2] / nv, mx, nv);
+    }
     for (int r = 0; r < kVsConstants; r++) {
         const auto& v = s.vsc[r];
         if (v[0] || v[1] || v[2] || v[3]) {
@@ -2347,6 +2426,69 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
 // small draws: their inputs and constants; then ends the draw's line
 void D3D12Backend::EndDrawCapture(const State& s, const Assembled& a, uint32_t count, const DrawConstants& c) {
     if (count <= kQuadVertices) CaptureInputs(s, a, c);
+    else {
+        // SG1: the first vertices of the big draws, raw bytes per input register (format, offset, stride)
+        fprintf(cap_, "\n     regs %04X vertices %u indices %u decode %llX", a.regs, a.vertex_count, a.index_count,
+                (unsigned long long)a.decode);
+        for (int r = 0; r < kVsConstants; r++) {
+            const auto& v = s.vsc[r];
+            if (v[0] || v[1] || v[2] || v[3]) fprintf(cap_, "\n     c%d %g %g %g %g", r - kVsConstantBias, v[0], v[1], v[2], v[3]);
+        }
+        fprintf(cap_, "\n     pc");
+        for (size_t r = 0; r < std::size(c.pc); r++) fprintf(cap_, " (%.3f %.3f %.3f %.3f)", c.pc[r][0], c.pc[r][1], c.pc[r][2], c.pc[r][3]);
+        fprintf(cap_, "\n     amb %g %g %g %g | mat0 %g %g %g %g | mat1 %g %g %g %g | mat3 %g %g %g %g", c.amb[0], c.amb[1], c.amb[2], c.amb[3], c.mat[0][0], c.mat[0][1],
+                c.mat[0][2], c.mat[0][3], c.mat[1][0], c.mat[1][1], c.mat[1][2], c.mat[1][3], c.mat[3][0], c.mat[3][1], c.mat[3][2], c.mat[3][3]);
+        for (int li = 0; li < 8; li++) {
+            const auto& L = c.lt[li];
+            if (L[0][0] == 0 && L[0][1] == 0 && L[0][2] == 0 && L[2][0] == 0 && L[2][1] == 0 && L[2][2] == 0 && L[3][3] == 0) continue;
+            fprintf(cap_, "\n     light%d diff %g %g %g amb %g %g %g pos %g %g %g range %g att %g %g %g", li, L[0][0], L[0][1], L[0][2], L[2][0], L[2][1], L[2][2], L[3][0], L[3][1],
+                    L[3][2], L[3][3], L[5][0], L[5][1], L[5][2]);
+        }
+        fprintf(cap_, "\n     tss");
+        for (int t = 0; t < 4; t++)
+            fprintf(cap_, " [%d tci %X ttf %X]", t, s.tss[size_t(t)][kTssTexCoordIndex], s.tss[size_t(t)][kTssTextureTransformFlags]);
+        for (int m = 0; m < 2; m++)
+            fprintf(cap_, "\n     tm%d %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", m, c.tm[m][0], c.tm[m][1], c.tm[m][2], c.tm[m][3],
+                    c.tm[m][4], c.tm[m][5], c.tm[m][6], c.tm[m][7], c.tm[m][8], c.tm[m][9], c.tm[m][10], c.tm[m][11], c.tm[m][12], c.tm[m][13], c.tm[m][14], c.tm[m][15]);
+        fprintf(cap_, "\n     wv %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", c.wv[0], c.wv[1], c.wv[2], c.wv[3], c.wv[4], c.wv[5], c.wv[6], c.wv[7],
+                c.wv[8], c.wv[9], c.wv[10], c.wv[11], c.wv[12], c.wv[13], c.wv[14], c.wv[15]);
+        for (int r = 0; r < 16; r++) {
+            if (!((a.regs >> r) & 1)) continue;
+            const VertexElement& el = a.elements[r];
+            const VertexBuffer& vb = a.buffers[el.buffer];
+            fprintf(cap_, "\n     v%d fmt %u buf %u off %u stride %u:", r, el.format, el.buffer, el.offset, vb.stride);
+            const std::vector<uint8_t>& g = a.gathered[el.buffer];
+            const uint8_t* src = vb.src ? vb.src : (g.empty() ? nullptr : g.data());
+            uint32_t bytes = vb.src ? vb.bytes : uint32_t(g.size());
+            for (uint32_t v = 0; src && v < 6; v++) {
+                uint32_t o = v * vb.stride + el.offset;
+                if (o + 4 > bytes) break;
+                fprintf(cap_, " [");
+                for (uint32_t k = 0; k < 16 && o + k < bytes && k < (vb.stride ? vb.stride - el.offset : 16); k++)
+                    fprintf(cap_, "%02X", src[o + k]);
+                fprintf(cap_, "]");
+            }
+            if ((r == 0 || r == 2) && el.format == 6 && src && vb.stride) {  // whole buffer: z range, tilted normals (fluid surfaces)
+                float zlo = 1e30f, zhi = -1e30f;
+                uint32_t nv = 0, tilted = 0;
+                for (uint32_t o = el.offset; o + 12 <= bytes; o += vb.stride, nv++) {
+                    float v[3];
+                    std::memcpy(v, src + o, 12);
+                    zlo = std::min(zlo, v[2]);
+                    zhi = std::max(zhi, v[2]);
+                    if (r == 2 && std::fabs(v[2] - 1.0f) > 1e-3f) tilted++;
+                }
+                if (nv) fprintf(cap_, " z %g..%g%s of %u", zlo, zhi, r == 2 ? (" tilted " + std::to_string(tilted)).c_str() : "", nv);
+            }
+            if (r == 3 && el.format == 87 && src && vb.stride) {  // average diffuse of the whole buffer, to see CPU lit colours
+                double sum[3] = {0, 0, 0};
+                uint32_t nv = 0;
+                for (uint32_t o = el.offset; o + 4 <= bytes; o += vb.stride, nv++)
+                    for (int k = 0; k < 3; k++) sum[k] += src[o + 2 - k];
+                if (nv) fprintf(cap_, " v3mean rgb %.1f %.1f %.1f of %u", sum[0] / nv, sum[1] / nv, sum[2] / nv, nv);
+            }
+        }
+    }
     fputc('\n', cap_);
 }
 
@@ -2399,6 +2541,21 @@ bool UnitTexcoords(const Assembled& a) {
     return any;
 }
 
+// The stages UnitTexcoords may clamp: only those that sample the checked inputs as they are. A fixed function stage
+// that generates its coordinates or runs them through its texture transform reads far outside 0..1 (UE2 terrain
+// layers come from camera space position) and must keep wrap, or the edge texel is smeared over the whole draw.
+uint32_t UnitClampStages(const State& s, const Assembled& a) {
+    if (!UnitTexcoords(a)) return 0;
+    bool program = (s.vs_handle & 1) && s.vs && !s.vs->program.empty();
+    if (program || a.pretransformed) return 0xF;
+    uint32_t mask = 0;
+    for (int i = 0; i < 4; i++) {
+        const auto& t = s.tss[size_t(i)];
+        if ((t[kTssTexCoordIndex] >> 16) == 0 && (t[kTssTextureTransformFlags] & 7) == 0) mask |= 1u << i;
+    }
+    return mask;
+}
+
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
     uint32_t slot = AllocSrvSlots(4);
@@ -2411,7 +2568,7 @@ void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a
         dev_->CreateShaderResourceView(stages.res[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
     cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
-    uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
+    uint32_t samplers = EnsureStageSamplers(s, stages, UnitClampStages(s, a));
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));
 }
 
@@ -2559,6 +2716,90 @@ void D3D12Backend::DeliverReports() {
     }
 }
 
+// SG1 (UE2): under sustained fire the title's dynamic light list holds the same muzzle flash light many times, and
+// each copy draws the same additive light pass again (14 identical passes on one floor seen), which stacks the flash
+// to white. A draw that adds onto the target without writing depth and repeats the previous draw exactly (state,
+// constants, textures, vertices and indices) is left out.
+static uint64_t DrawSignature(const State& s, const Assembled& a, const PsoKey& k, const DrawConstants& c, uint32_t prim) {
+    uint64_t h = Hash(&k, sizeof(k));
+    h = Hash(&c, sizeof(c), h);
+    h = Hash(s.vsc.data(), sizeof(s.vsc), h);
+    h = Hash(s.textures.data(), sizeof(s.textures), h);
+    h = Hash(&s.rt.data, sizeof(s.rt.data), h);
+    uint32_t meta[5] = {prim, a.vertex_count, a.draw_count, uint32_t(a.base_vertex), a.index_count};
+    h = Hash(meta, sizeof(meta), h);
+    if (!a.vertices.empty()) {
+        h = Hash(a.vertices.data(), a.vertices.size() * sizeof(float), h);
+    } else {
+        for (uint32_t i = 0; i < a.buffer_count && i < a.buffers.size(); i++) {
+            const VertexBuffer& vb = a.buffers[i];
+            if (vb.src) {
+                uint64_t n = vb.stride ? std::min<uint64_t>(vb.bytes, uint64_t(a.vertex_count) * vb.stride) : vb.bytes;
+                h = Hash(vb.src, size_t(n), h);
+            }
+            if (!a.gathered[i].empty()) h = Hash(a.gathered[i].data(), a.gathered[i].size(), h);
+        }
+    }
+    if (!a.indices.empty()) h = Hash(a.indices.data(), a.indices.size() * sizeof(uint32_t), h);
+    else if (a.index_src && a.index_count) h = Hash(a.index_src, size_t(a.index_count) * (a.index16 ? 2 : 4), h);
+    return h | 1;
+}
+
+// diagnostics (SG1 settings menu, GPU debug): counts the draws per shader and skips the ones switched off
+static std::atomic<int> g_dbg_draw_no{0};
+static bool DebugSkipDraw(const State& s, const PsoKey& k, uint32_t prim, uint32_t count) {
+    int no = g_dbg_draw_no.fetch_add(1);
+    if (g_dbg_active.load()) {
+        if (no == g_dbg_lo.load() - 1) {
+            std::lock_guard lock(g_dbg.mu);
+            g_dbg_probe = {true, prim, count, uint32_t(s.vs_handle), s.ps ? uint32_t(s.ps->handle) : 0u, k.src, k.dst,
+                           k.zwrite ? 1u : 0u, k.blend ? 1u : 0u, s.textures[0] ? uint32_t(uintptr_t(s.textures[0]) & 0xFFFFFFFF) : 0u, 0};
+        }
+    }
+    if (g_dbg_hide_range.load() && no >= g_dbg_lo.load() && no <= g_dbg_hi.load()) return true;
+
+    uint32_t pv = s.ps ? uint32_t(s.ps->handle) : 0, vv = uint32_t(s.vs_handle);
+    bool skip = false;
+    if (g_dbg_active.load()) {
+        std::lock_guard lock(g_dbg.mu);
+        auto bump = [&](std::vector<DbgShader>& v, uint32_t h) {
+            for (auto& e : v) if (e.handle == h) { e.count++; skip |= e.skip; return; }
+            v.push_back({h, 1, false});
+        };
+        bump(g_dbg.ps, pv);
+        bump(g_dbg.vs, vv);
+        if (k.blend) {
+            DbgSig* f = nullptr;
+            for (auto& e : g_dbg.sig)
+                if (e.vs == vv && e.ps == pv && e.src == k.src && e.dst == k.dst && e.zwrite == (k.zwrite ? 1u : 0u) &&
+                    e.prim == prim && e.count == count) { f = &e; break; }
+            if (!f) {
+                g_dbg.sig.push_back({vv, pv, uint32_t(k.src), uint32_t(k.dst), k.zwrite ? 1u : 0u, prim, count, 0, false});
+                f = &g_dbg.sig.back();
+            }
+            f->n++;
+            skip |= f->skip;
+        }
+        if (k.blend) bump(g_dbg.bl, uint32_t(k.src) << 16 | uint32_t(k.dst) << 4 | (k.zwrite ? 1u : 0u));
+    } else if (g_dbg_any_skip.load()) {
+        std::lock_guard lock(g_dbg.mu);
+        for (auto& e : g_dbg.ps) if (e.skip && e.handle == pv) skip = true;
+        for (auto& e : g_dbg.vs) if (e.skip && e.handle == vv) skip = true;
+        if (k.blend)
+            for (auto& e : g_dbg.sig)
+                if (e.skip && e.vs == vv && e.ps == pv && e.src == k.src && e.dst == k.dst &&
+                    e.zwrite == (k.zwrite ? 1u : 0u) && e.prim == prim && e.count == count) skip = true;
+        if (k.blend) {
+            uint32_t bh = uint32_t(k.src) << 16 | uint32_t(k.dst) << 4 | (k.zwrite ? 1u : 0u);
+            for (auto& e : g_dbg.bl) if (e.skip && e.handle == bh) skip = true;
+        }
+    }
+    if (skip) return true;
+    if (g_dbg_skip_add.load() && k.blend && k.dst == 1 && !k.zwrite) return true;
+    if (g_dbg_skip_blend.load() && k.blend) return true;
+    return false;
+}
+
 void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
@@ -2593,6 +2834,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     BuildPipelineKey(s, a, sh.vh, sh.ph, k);
     ID3D12PipelineState* pso = EnsurePipeline(k, sh.vs_code, sh.ps_code);
     if (!pso) return;
+    if (DebugSkipDraw(s, k, prim, count)) return;
     cl_->SetPipelineState(pso);
 
     // constants
@@ -2600,6 +2842,13 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     SurfaceSize(bound_rt_ ? s.rt : s.zs, size.w, size.h);
     DrawConstants c{};
     UploadConstants(s, sh, k, stages, size, c);
+    {
+        uint64_t sig = DrawSignature(s, a, k, c, prim);
+        bool repeat = sig == last_draw_sig_;
+        last_draw_sig_ = sig;
+        bool additive = k.blend && !k.zwrite && k.src == 1 && (k.dst == 1 || k.dst == 0x301);
+        if (repeat && additive && g_light_dedupe.load()) return;
+    }
 
     if (cap_) {
         CaptureDraw(s, prim, count, k, c, stages);
@@ -2664,6 +2913,7 @@ void D3D12Backend::Clear(const State& s, uint32_t count, const uint8_t* rects, u
         fprintf(cap_, "%04u clear rt %08X ds %08X flags %X color %08X z %.3f\n", cap_i_++, s.rt.data, s.zs.data, flags,
                 color, z);
     }
+    last_draw_sig_ = 0;
     Target* rt = (flags & kClearTarget) ? EnsureTarget(s.rt, false) : nullptr;
     Target* ds = (flags & (kClearZ | kClearStencil)) ? EnsureTarget(s.zs, true) : nullptr;
     uint32_t gw;
@@ -2952,6 +3202,7 @@ void D3D12Backend::BlitFrame(Target& t) {
 }
 
 void D3D12Backend::RenderUi() {
+    g_dbg_frame_draws = g_dbg_draw_no.exchange(0);
     std::lock_guard lock(app::UiLock());
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();

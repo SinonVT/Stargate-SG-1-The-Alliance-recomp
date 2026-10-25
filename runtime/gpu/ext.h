@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "gpu/shaders.h"
@@ -104,6 +105,39 @@ inline std::atomic<float> g_display_aspect{4.0f / 3.0f};
 inline int (*g_texture_replace)(const TextureDesc& d, const uint8_t* guest, std::vector<uint8_t>& bgra, uint32_t& w,
                                  uint32_t& h) = nullptr;
 inline std::atomic<uint32_t> g_texture_epoch{0};
+
+// Debug (SG1 settings menu, "GPU debug"): draws that are not drawn, to find which one makes a glitch. While g_dbg_active
+// the renderer counts the draws per pixel / vertex shader handle; an entry with skip set is not drawn.
+struct DbgShader {
+    uint32_t handle = 0, count = 0;
+    bool skip = false;
+};
+// a kind of blended draw: shaders, blend, geometry size; stays the same while the camera moves
+struct DbgSig {
+    uint32_t vs = 0, ps = 0, src = 0, dst = 0, zwrite = 0, prim = 0, count = 0, n = 0;
+    bool skip = false;
+};
+struct DbgDraws {
+    std::vector<DbgSig> sig;
+    std::mutex mu;
+    std::vector<DbgShader> ps, vs, bl;  // bl: blend modes, handle = src << 16 | dst << 4 | depth write
+};
+inline DbgDraws g_dbg;
+inline std::atomic<bool> g_dbg_active{false};      // the menu section is open: count the draws
+inline std::atomic<bool> g_dbg_any_skip{false};    // some skip is on
+inline std::atomic<bool> g_dbg_skip_add{false};    // additive draws that do not write depth
+inline std::atomic<bool> g_dbg_skip_blend{false};  // every blended draw
+inline std::atomic<bool> g_dbg_skip_alpha_test{false};
+inline std::atomic<bool> g_dbg_hide_range{false};  // hide the draws numbered lo..hi of every frame
+inline std::atomic<int> g_dbg_lo{0}, g_dbg_hi{0};
+inline std::atomic<int> g_dbg_frame_draws{0};       // draws in the last frame
+struct DbgProbe {  // the draw numbered g_dbg_lo
+    bool valid = false;
+    uint32_t prim = 0, count = 0, vs = 0, ps = 0, src = 0, dst = 0, zwrite = 0, blend = 0, tex0 = 0, tex1 = 0;
+};
+inline DbgProbe g_dbg_probe;
+inline std::atomic<bool> g_dbg_no_fog{false};          // fog off for every draw
+inline std::atomic<bool> g_dbg_black_fog_blend{false}; // fog colour black on blended draws
 
 // before the backend is made
 inline void SetExtension(std::unique_ptr<Extension> e) {

@@ -5,8 +5,9 @@ void OnWindow(void* hwnd);
 bool OnMessage(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);
 void OnUi(double fps);   // src/game/menus.cpp
 extern uint32_t g_opt_sens_x10, g_opt_menu_x100, g_opt_fov;
-extern bool g_opt_invert_y, g_opt_hor_plus, g_opt_fill, g_opt_hd_textures, g_opt_custom_textures, g_opt_maximized;
+extern bool g_opt_invert_y, g_opt_hor_plus, g_opt_fill, g_opt_hd_textures, g_opt_custom_textures, g_opt_maximized, g_opt_no_controllers;
 void FitWindowed();      // src/game/menus.cpp
+void OnPad(int port, input::Pad& pad);  // src/game/kbm.cpp: idle while the port's menus are open
 bool g_windowed_once = false;
 // first start: a window, not the whole screen; later starts keep what the menu set
 void Init() {
@@ -37,6 +38,7 @@ const app::GameInfo app::kGame = {
                 {"fov", nullptr, &sg1kbm::g_opt_fov},
                 {"fov_hor_plus", &sg1kbm::g_opt_hor_plus, nullptr},
                 {"widescreen_fill", &sg1kbm::g_opt_fill, nullptr},
+                {"controllers_disabled", &sg1kbm::g_opt_no_controllers, nullptr},
                 {"hd_textures", &sg1kbm::g_opt_hd_textures, nullptr},
                 {"custom_textures", &sg1kbm::g_opt_custom_textures, nullptr},
                 {"window_maximized", &sg1kbm::g_opt_maximized, nullptr},
@@ -48,6 +50,6 @@ const app::GameInfo app::kGame = {
     .window = sg1kbm::OnWindow,                    // the game window is up
     .message = sg1kbm::OnMessage,                   // window messages first; true takes one
     .ui = sg1kbm::OnUi,                   // ImGui drawing each frame: Insert settings, V voice
-    .pad = nullptr,                       // changes a polled pad
+    .pad = sg1kbm::OnPad,                 // changes a polled pad
     .rumble = nullptr,                    // changes a rumble before it is set
 };

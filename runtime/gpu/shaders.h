@@ -53,6 +53,9 @@ struct FixedKey {
     uint32_t tex[4] = {};  // per stage: coordinate set, texgen at bit 4, D3DTTFF count at bit 8, projected bit 11, set size at bit 12
 };
 FixedKey MakeFixedKey(const State& s);
+// the enabled lights a fixed function draw uses, D3DLIGHTTYPE 2 bits per slot (a slot identical to an earlier one left
+// out, see g_light_dedupe); the shader takes them from the constants, so it is the same for any set of lights
+uint32_t LightTypes(const State& s);
 std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode = 0, const FixedKey& f = {});
 std::string PixelHlsl(const PixelKey& k);
 // a screen quad's vertex or pixel shader: texture coordinates as the quad was drawn, before its far edges were pulled out

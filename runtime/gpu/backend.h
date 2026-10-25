@@ -64,5 +64,16 @@ inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read
 
 // F3: save the next frame, every draw and target, under diag::CaptureDir
 inline std::atomic<bool> g_capture{false};
+// debug (SG1 menu): every draw waits for the render thread, so vertex memory is read before the title can change it
+inline std::atomic<bool> g_dbg_sync_draw{false};
+// copy the vertices of every draw when it is recorded (the title rewrites its vertex buffers without waiting)
+inline std::atomic<bool> g_vb_snapshot{true};
+// SG1: drop duplicate muzzle flash lights (identical light slots, repeated additive light passes, attenuation cap)
+inline std::atomic<bool> g_light_dedupe{true};
+// debug (SG1 menu): texture sampler overrides
+inline std::atomic<bool> g_dbg_ignore_lod_bias{false}, g_dbg_ignore_max_mip{false};
+inline std::atomic<float> g_dbg_lod_bias_add{0.0f};
+inline std::atomic<int> g_dbg_samp_mode{0};
+inline std::atomic<bool> g_dbg_layer_z_always{false};
 
 }  // namespace gpu

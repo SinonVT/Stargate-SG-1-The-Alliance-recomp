@@ -39,6 +39,8 @@ constexpr uint32_t kBatchCommands = 64;
 constexpr uint32_t kHeaderBytes = 20, kHeaderSlot = 32;
 constexpr uint32_t kHeaderRing = 1u << 20;  // guest memory for header copies; a copy is renewed after half a ring
 
+constexpr uint32_t kVRing = 16u << 20, kVBlock = 1u << 20, kVSnapMax = 1u << 20;  // vertex snapshots
+
 enum class WaitFor : uint8_t { ReadBack, Resource, Fence, Flush, Copy, Frame, Count };
 
 enum class Op : uint8_t { State, Draw, Clear, Copy, Present, Sync, RecordLate, Flush, Gamma, ClearReport, GetReport };
@@ -98,6 +100,7 @@ class Threaded final : public Backend {
 public:
     explicit Threaded(std::unique_ptr<Backend> inner) : inner_(std::move(inner)), ranges_(StateRanges()) {
         ring_ = mem::AllocSystem(kHeaderRing, 64);
+        vring_ = mem::AllocSystem(kVRing, 64);
         cur_ = NewBatch();
         std::thread([this] { Run(); }).detach();
     }
@@ -114,9 +117,71 @@ public:
 
     bool Init(uint32_t width, uint32_t height) override { return inner_->Init(width, height); }
 
-    void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
+    // The title refills its dynamic vertex buffers (NOOVERWRITE locks, no wait) while earlier draws still wait in the
+    // queue, so the vertices a draw uses are copied now and the draw is pointed at the copy.
+    struct SavedStream {
+        size_t i;
+        uint32_t vb;
+    };
+    void Snapshot(State& s, uint32_t start, uint32_t count, const uint8_t* indices, std::vector<SavedStream>& saved) {
+        if (!vring_ || !g_vb_snapshot.load()) return;
+        uint32_t lo = start, hi = start + (count ? count - 1 : 0);
+        if (indices) {
+            uint32_t l = 0xFFFF, h = 0;
+            for (uint32_t i = 0; i < count; i++) {
+                uint16_t v;
+                std::memcpy(&v, indices + i * 2, 2);
+                l = std::min<uint32_t>(l, v);
+                h = std::max<uint32_t>(h, v);
+            }
+            if (l > h) return;
+            lo = uint32_t(int64_t(l) + s.base_vertex);
+            hi = uint32_t(int64_t(h) + s.base_vertex);
+        }
+        if (hi < lo) return;
+        for (size_t i = 0; i < s.streams.size(); i++) {
+            auto& st = s.streams[i];
+            if (!st.vb || !st.stride) continue;
+            uint32_t common = kernel::R32(st.vb);
+            if ((common & 0x70000) != 0) continue;  // a vertex buffer
+            uint32_t src = mem::VirtualFromPhysical(kernel::R32(st.vb + 4));
+            uint64_t bytes = uint64_t(hi - lo + 1) * st.stride;
+            if (!src || bytes > kVSnapMax) continue;
+            uint32_t at = VAlloc(uint32_t(bytes));
+            if (!at) continue;
+            // the draw finds vertex n at Data + n * stride
+            uint32_t shifted = at - lo * st.stride;
+            if (lo * uint64_t(st.stride) >= at || shifted < 0x10000000u) {
+                LOG_FIRST(8, "render thread: vertex snapshot skipped, ring %08X first vertex %u stride %u", at, lo, st.stride);
+                continue;
+            }
+            std::memcpy(kernel::HostPtr(at), kernel::HostPtr(src + lo * st.stride), size_t(bytes));
+            uint32_t fake[3] = {common, shifted, kernel::R32(st.vb + 8)};
+            saved.push_back({i, st.vb});
+            st.vb = Scratch(fake, 12);
+        }
+    }
+
+    uint32_t VAlloc(uint32_t n) {
+        n = (n + 15) & ~15u;
+        if (vpos_ % kVRing + n > kVRing) vpos_ += kVRing - vpos_ % kVRing;
+        uint64_t first = (vpos_ % kVRing) / kVBlock, last = (vpos_ % kVRing + n - 1) / kVBlock;
+        for (uint64_t b = first; b <= last; b++) {
+            Wait(vblock_[b], WaitFor::Resource, "vertex snapshot space");
+            vblock_[b] = cur_->id;
+        }
+        uint32_t at = vring_ + uint32_t(vpos_ % kVRing);
+        vpos_ += n;
+        return at;
+    }
+
+    void Draw(const State& cs, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override {
         auto t = Clock::now();
+        State& s = const_cast<State&>(cs);
+        std::vector<SavedStream> saved;
+        Snapshot(s, start, count, indices, saved);
         SendState(s);
+        for (const auto& sv : saved) s.streams[sv.i].vb = sv.vb;
         Cmd c{Op::Draw};
         c.a = prim;
         c.b = start;
@@ -132,7 +197,11 @@ public:
         Use(s.rt.header);
         Use(s.zs.header);
         Written(s.rt);
-        if (cur_->cmds.size() >= kBatchCommands) Submit();
+        if (g_dbg_sync_draw.load()) {
+            Wait(Submit(), WaitFor::Flush, nullptr);
+        } else if (cur_->cmds.size() >= kBatchCommands) {
+            Submit();
+        }
         g_perf_capture_ns += Ns(t);
     }
 
@@ -461,8 +530,9 @@ private:
     };
     std::array<Recent<HeaderCopy>, 64> recent_headers_{};
     std::array<Recent<uint64_t>, 64> recent_uses_{};
-    uint32_t ring_ = 0;
-    uint64_t ring_pos_ = 0;
+    uint32_t ring_ = 0, vring_ = 0;
+    uint64_t ring_pos_ = 0, vpos_ = 0;
+    std::array<uint64_t, kVRing / kVBlock> vblock_{};  // the batch that last wrote each block of the vertex ring
     Batch* cur_ = nullptr;
     State sent_;  // the state as the render thread will have it
     std::unordered_map<uint32_t, uint64_t> last_use_;

@@ -4,3 +4,9 @@
 .vscode/
 .idea/
 *.orig_pre_wide
+
+# local working files: edit backups, debug frame captures (game images), locally built helper binaries
+*.bak_*
+/_cap/
+games/sg1/tools/libhdhash.dll
+games/sg1/tools/libhdhash.lib

@@ -19,7 +19,7 @@ inline const std::filesystem::path& CaptureDir() {
 #else
         const char* v = std::getenv("XBE_CAPTURE_DIR");
 #endif
-        return v ? std::filesystem::path(v) : std::filesystem::path();
+        return v ? std::filesystem::path(v) : std::filesystem::path("captures");  // SG1: F3 and the debug menu capture without setting it
     }();
     return dir;
 }

@@ -1,5 +1,6 @@
 #include "gpu/shaders.h"
 #include "gpu/vertex.h"
+#include "gpu/backend.h"
 
 #include <algorithm>
 #include <bit>
@@ -730,15 +731,32 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     return s;
 }
 
+uint32_t LightTypes(const State& s) {
+    uint32_t types = 0;
+    if (!s.rs[kRsLighting]) return 0;
+    // SG1 (UE2): under sustained fire the title fills several slots with the same muzzle flash light, which the sum
+    // then counts up to 8 times; a slot identical to an earlier enabled one is left out
+    for (int i = 0; i < 8; i++) {
+        if (!((s.light_enable >> i) & 1)) continue;
+        bool dup = false;
+        for (int j = 0; j < i && !dup; j++)
+            dup = ((s.light_enable >> j) & 1) && s.lights[size_t(j)] == s.lights[size_t(i)];
+        if (!dup || !g_light_dedupe.load()) types |= (s.lights[size_t(i)][0] & 3) << (i * 2);
+    }
+    return types;
+}
+
 FixedKey MakeFixedKey(const State& s) {
     FixedKey f;
     if (s.rs[kRsLighting]) {
         f.light = 1 | (s.rs[kRsSpecularEnable] ? 2 : 0) | (s.rs[kRsLocalViewer] ? 4 : 0) | (s.rs[kRsNormalizeNormals] ? 8 : 0);
+        if (g_light_dedupe.load()) f.light |= 16;  // SG1: attenuation capped at 1
         if (s.rs[kRsColorVertex])
             f.light |= (s.rs[kRsDiffuseMaterialSource] & 3) << 8 | (s.rs[kRsSpecularMaterialSource] & 3) << 10 |
                        (s.rs[kRsAmbientMaterialSource] & 3) << 12 | (s.rs[kRsEmissiveMaterialSource] & 3) << 14;
-        for (int i = 0; i < 8; i++)
-            if ((s.light_enable >> i) & 1) f.types |= (s.lights[size_t(i)][0] & 3) << (i * 2);
+        // which lights are on lives in the constants (LightTypes): one shader whatever the slots, or every muzzle flash
+        // put its light in a new combination of slots, each a new shader and pipeline compiled in play (a stutter)
+        f.types = LightTypes(s) ? 1 : 0;
     }
     for (int t = 0; t < 4; t++) {
         uint32_t tci = s.tss[size_t(t)][kTssTexCoordIndex], ttf = s.tss[size_t(t)][kTssTextureTransformFlags];
@@ -765,6 +783,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     s += kVsPrologue;
     auto v = [&](int r, const char* def) { return (regs >> r) & 1 ? F("i.v%d", r) : std::string(def); };
     bool lit = !pretransformed && (f.light & 1);
+    bool cap = (f.light & 16) != 0;
     if (pretransformed) {
         s += "    float4 rhw = " + v(0, "float4(0,0,0,1)") + ";\n";
         s += "    float w = rhw.w == 0 ? 1 : 1 / rhw.w;\n";
@@ -775,6 +794,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    float3 vp = mul(ip, wv).xyz;\n";
         s += "    float3 vn = mul(float4(" + v(2, "float4(0,0,0,0)") + ".xyz, 0), wvn).xyz;\n";
         if (f.light & 8) s += "    vn = dot(vn, vn) > 0 ? normalize(vn) : vn;\n";
+        s += "    float3 vnu = dot(vn, vn) > 0 ? normalize(vn) : vn;\n";
     }
     if (lit) {
         // D3DMCS: 1 the vertex diffuse, 2 its specular, else the material
@@ -788,27 +808,25 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
              ", me = " + src(3, "mat[3]") + ";\n";
         s += "    float3 la = 0, ld = 0, ls = 0;\n";
         s += (f.light & 4) ? "    float3 eye = -normalize(vp);\n" : "    float3 eye = float3(0, 0, 1);\n";
-        for (int n = 0; n < 8; n++) {
-            uint32_t type = (f.types >> (n * 2)) & 3;  // D3DLIGHTTYPE: 1 point, 2 spot, 3 directional
-            if (!type) continue;
-            int b = n * 7;
-            s += "    {\n        float3 l;\n        float att = 1;\n";
-            if (type == 3) {
-                s += F("        l = -normalize(lt[%d].xyz);\n", b + 4);
-            } else {
-                s += F("        float3 d = lt[%d].xyz - vp;\n        float dist = length(d);\n        l = d / max(dist, 1e-6);\n", b + 3);
-                s += F("        att = dist > lt[%d].w ? 0 : 1 / max(lt[%d].x + lt[%d].y * dist + lt[%d].z * dist * dist, 1e-6);\n", b + 3, b + 5,
-                       b + 5, b + 5);
-                if (type == 2) {
-                    s += F("        float rho = dot(-l, normalize(lt[%d].xyz));\n", b + 4);
-                    s += F("        att *= rho > lt[%d].x ? 1 : rho <= lt[%d].y ? 0 : pow(saturate((rho - lt[%d].y) / (lt[%d].x - lt[%d].y)), lt[%d].w);\n",
-                           b + 6, b + 6, b + 6, b + 6, b + 6, b + 4);
-                }
-            }
-            s += F("        la += att * lt[%d].rgb;\n", b + 2);
+        // every light slot in a loop: its D3DLIGHTTYPE is in lt[slot * 7 + 6].z (0 off, 1 point, 2 spot, 3 directional)
+        if (f.types) {
+            s += "    [loop] for (int n = 0; n < 8; n++) {\n";
+            s += "        int b = n * 7;\n";
+            s += "        float type = lt[b + 6].z;\n";
+            s += "        if (type == 0) continue;\n";
+            s += "        float3 l;\n        float att = 1;\n";
+            s += "        if (type == 3) {\n            l = -normalize(lt[b + 4].xyz);\n        } else {\n";
+            s += "            float3 d = lt[b + 3].xyz - vp;\n            float dist = length(d);\n            l = d / max(dist, 1e-6);\n";
+            s += F("            att = dist > lt[b + 3].w ? 0 : %s1 / max(lt[b + 5].x + lt[b + 5].y * dist + lt[b + 5].z * dist * dist, 1e-6)%s;\n",
+                   cap ? "min(1, " : "", cap ? ")" : "");
+            s += "            if (type == 2) {\n";
+            s += "                float rho = dot(-l, normalize(lt[b + 4].xyz));\n";
+            s += "                att *= rho > lt[b + 6].x ? 1 : rho <= lt[b + 6].y ? 0 : pow(saturate((rho - lt[b + 6].y) / (lt[b + 6].x - lt[b + 6].y)), lt[b + 4].w);\n";
+            s += "            }\n        }\n";
+            s += "        la += att * lt[b + 2].rgb;\n";
             s += "        float nl = dot(vn, l);\n";
-            s += F("        ld += att * lt[%d].rgb * max(nl, 0);\n", b);
-            if (f.light & 2) s += F("        if (nl > 0) ls += att * lt[%d].rgb * pow(max(dot(vn, normalize(l + eye)), 0), mat[4].x);\n", b + 1);
+            s += "        ld += att * lt[b].rgb * max(nl, 0);\n";
+            if (f.light & 2) s += "        if (nl > 0) ls += att * lt[b + 1].rgb * pow(max(dot(vn, normalize(l + eye)), 0), mat[4].x);\n";
             s += "    }\n";
         }
         s += "    oD0 = float4(me.rgb + ma.rgb * (amb.rgb + la) + md.rgb * ld, md.a);\n";
@@ -826,7 +844,9 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
             continue;
         }
         // generated coordinates are view space; a transform takes the set with 1 after its last element
-        std::string c = gen == 1 ? "float4(vn, 1)" : gen == 2 ? "float4(vp, 1)" : gen == 3 ? "float4(reflect(normalize(vp), vn), 1)"
+        // generated normals and reflections take a unit normal whether or not lighting is on: UE2 fluid surfaces (the
+        // stargate's event horizon) store unnormalized normals and turn into noise without it
+        std::string c = gen == 1 ? "float4(vnu, 1)" : gen == 2 ? "float4(vp, 1)" : gen == 3 ? "float4(reflect(normalize(vp), vnu), 1)"
                         : size == 1 ? F("float4(%s.x, 1, 0, 0)", in.c_str()) : size == 2 ? F("float4(%s.xy, 1, 0)", in.c_str())
                         : size == 3 ? F("float4(%s.xyz, 1)", in.c_str()) : in;
         if (!count) {
