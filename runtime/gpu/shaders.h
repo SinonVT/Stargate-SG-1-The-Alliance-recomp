@@ -100,6 +100,7 @@ struct DrawConstants {
     float amb[4];        // D3DRS_AMBIENT
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
     float rtshift[4];    // per kTexTarget stage: host pixels its reads move along x and y, negative up and left
+    float ystretch[4];   // SG1 wide fill: x scales clip y of perspective draws to the back buffer, 0 off
 };
 
 }  // namespace gpu

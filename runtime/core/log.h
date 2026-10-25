@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdlib>
 #include <atomic>
 #include <cstdarg>
 #include <cstdint>
@@ -15,8 +16,9 @@ void Write(Level lv, const char* fmt, ...) __attribute__((format(printf, 2, 3)))
 void Flush();
 const std::string& Path();
 
+// SG1 local: a release build logs everything when XBE_VERBOSE is set
 #ifdef NDEBUG
-inline constexpr bool kVerbose = false;
+inline const bool kVerbose = std::getenv("XBE_VERBOSE") != nullptr;
 #else
 inline constexpr bool kVerbose = true;
 #endif

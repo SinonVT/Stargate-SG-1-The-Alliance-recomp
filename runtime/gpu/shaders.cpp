@@ -54,6 +54,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 amb;
     float4 lt[56];
     float4 rtshift;
+    float4 ystretch;
 };
 )";
 
@@ -232,6 +233,7 @@ const char* kVsEpilogue = R"(
     q.xyz *= p.w;
     q.w = p.w;
     o.pos = q;
+    if (ystretch.x != 0 && abs(o.pos.w - 1) > 1e-5) o.pos.y *= ystretch.x;
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = saturate(oB0);
@@ -845,6 +847,7 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     if (surf.w == 0 && abs(sp.x - (surf.x - 0.5)) < 1e-3) cp.x = cp.w;
     if (surf.w == 0 && abs(sp.y - (surf.y - 0.5)) < 1e-3) cp.y = -cp.w;
     o.pos = cp;
+    if (ystretch.x != 0 && abs(o.pos.w - 1) > 1e-5) o.pos.y *= ystretch.x;
     o.d0 = saturate(oD0);
     o.d1 = saturate(oD1);
     o.b0 = o.d0;

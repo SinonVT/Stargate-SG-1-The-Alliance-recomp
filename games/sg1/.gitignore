@@ -1,0 +1,35 @@
+# build
+/out/
+/build/
+*.zip
+*.pdb
+*.exe
+*.obj
+*.o
+
+# recompiled code, derived from the game
+/generated/
+
+# your own game files: never commit them
+/assets/
+*.xbe
+*.iso
+*.xiso
+*.utx
+*.unr
+*.u
+
+# runtime files
+settings.toml
+/logs/
+/hdd/
+/CrashDumps/
+texpack/
+
+# backups the tools leave
+*.orig_*
+*.pre_*
+
+# Python
+__pycache__/
+*.pyc

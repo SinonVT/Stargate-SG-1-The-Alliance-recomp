@@ -10,6 +10,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -90,6 +91,19 @@ public:
 };
 
 inline std::unique_ptr<Extension> g_extension;
+
+// SG1 wide fill: the 4:3 frame fills the window, perspective draws to the back buffer are stretched in clip y to
+// match (the game widens its FOV to suit, Hor+); g_display_aspect is the window's, as the last present had it
+inline std::atomic<bool> g_fill_window{false};
+inline std::atomic<float> g_display_aspect{4.0f / 3.0f};
+
+// SG1 texture pack: a guest 2D texture's level 0 (its bytes as in guest memory) may be swapped for a BGRA8 image of
+// any size, which the renderer gives a full mip chain. Called on the render thread when the texture is made or its
+// bytes change: 1 with w, h and w * h * 4 bytes of bgra, 0 for the game's own, 2 not ready yet (the game's own is
+// drawn and it is asked again each frame it is used). g_texture_epoch: bumped, every texture asks again.
+inline int (*g_texture_replace)(const TextureDesc& d, const uint8_t* guest, std::vector<uint8_t>& bgra, uint32_t& w,
+                                 uint32_t& h) = nullptr;
+inline std::atomic<uint32_t> g_texture_epoch{0};
 
 // before the backend is made
 inline void SetExtension(std::unique_ptr<Extension> e) {

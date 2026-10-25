@@ -321,6 +321,9 @@ struct Tex {
     uint64_t frame = 0;
     uint64_t palette = 0;  // hash of the colours a P8 texture was decoded with
     uint8_t flags = 0;  // Extension::Decoded's
+    bool hd = false;    // SG1: holds a g_texture_replace image, hw x hh BGRA8
+    bool pending = false;  // SG1: g_texture_replace is still loading one
+    uint32_t hw = 0, hh = 0;
 };
 
 struct PsoKey {
@@ -505,6 +508,7 @@ private:
     void UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint8_t* p, const uint32_t* colours,
                        bool same);
     void UploadTextureLevel(Tex& tx, uint32_t f, uint32_t l, const std::vector<uint8_t>& px, uint32_t pitch);
+    bool UploadReplacement(Tex& tx, const TextureDesc& d, std::vector<uint8_t>& px, uint32_t w, uint32_t h);
     void EnsurePixelShader(const PixelKey& pk, DrawShaders& sh);
     void BuildPipelineKey(const State& s, const Assembled& a, uint64_t vh, uint64_t ph, PsoKey& k);
     void KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k);
@@ -1689,6 +1693,63 @@ void D3D12Backend::UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo
     Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
 
+// SG1 texture pack: px (w x h BGRA8) with a box filtered mip chain, the resource made again when its size changed
+bool D3D12Backend::UploadReplacement(Tex& tx, const TextureDesc& d, std::vector<uint8_t>& px, uint32_t w, uint32_t h) {
+    uint32_t levels = 1;
+    while ((std::max(w, h) >> levels) > 0) levels++;
+    D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (!tx.res || !tx.hd || tx.hw != w || tx.hh != h) {
+        if (tx.res) CurrentFrame().garbage.push_back(tx.res);
+        tx.res.Reset();
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC td{};
+        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width = w;
+        td.Height = h;
+        td.DepthOrArraySize = 1;
+        td.MipLevels = UINT16(levels);
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&tx.res))))
+            return false;
+        st = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    tx.d = d;
+    tx.fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+    tx.levels = levels;
+    tx.flags = 0;
+    tx.hd = true;
+    tx.hw = w;
+    tx.hh = h;
+    Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_COPY_DEST);
+    std::vector<uint8_t> next;
+    uint32_t lw = w, lh = h;
+    for (uint32_t l = 0; l < levels; l++) {
+        UploadTextureLevel(tx, 0, l, px, lw * 4);
+        if (l + 1 == levels) break;
+        uint32_t nw = std::max(lw / 2, 1u), nh = std::max(lh / 2, 1u);
+        next.assign(size_t(nw) * nh * 4, 0);
+        for (uint32_t y = 0; y < nh; y++) {
+            uint32_t y0 = std::min(y * 2, lh - 1), y1 = std::min(y * 2 + 1, lh - 1);
+            for (uint32_t x = 0; x < nw; x++) {
+                uint32_t x0 = std::min(x * 2, lw - 1), x1 = std::min(x * 2 + 1, lw - 1);
+                const uint8_t* a = &px[(size_t(y0) * lw + x0) * 4];
+                const uint8_t* b = &px[(size_t(y0) * lw + x1) * 4];
+                const uint8_t* c = &px[(size_t(y1) * lw + x0) * 4];
+                const uint8_t* e = &px[(size_t(y1) * lw + x1) * 4];
+                uint8_t* o = &next[(size_t(y) * nw + x) * 4];
+                for (int k = 0; k < 4; k++) o[k] = uint8_t((a[k] + b[k] + c[k] + e[k] + 2) / 4);
+            }
+        }
+        px.swap(next);
+        lw = nw;
+        lh = nh;
+    }
+    Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    return true;
+}
+
 void FillTextureView(const Tex& tx, const TextureDesc& d, D3D12_SHADER_RESOURCE_VIEW_DESC& sv) {
     sv.Format = tx.fmt;
     if (d.cube) {
@@ -1741,14 +1802,37 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
         tx.palette = palette.hash;
         const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
         auto perf_t = PerfClock::now();
-        uint64_t sig = MemSig(d.data, total) ^ DirtyEpoch(d.data) ^ palette.hash;
+        uint64_t sig = MemSig(d.data, total) ^ DirtyEpoch(d.data) ^ palette.hash ^
+                       uint64_t(g_texture_epoch.load()) * 0x9E3779B97F4A7C15ull;
         g_perf.sig += PerfMs(perf_t);
-        if (sig != tx.sig || !same) {
+        if (sig != tx.sig || !same || tx.pending) {
+            bool changed = sig != tx.sig || !same;
             PerfScope perf_up{g_perf.texup};
             g_perf.texups++;
             g_perf.texup_bytes += total;
             tx.sig = sig;
-            UploadTexture(tx, d, fi, p, palette.va ? palette.colours : nullptr, same);
+            // SG1 texture pack: an HD or user image for this texture
+            std::vector<uint8_t> hp;
+            uint32_t hw = 0, hh = 0;
+            int r = g_texture_replace && !d.cube && d.depth == 1 && !d.linear && !palette.va
+                        ? g_texture_replace(d, p, hp, hw, hh) : 0;
+            bool hd = r == 1 && hw && hh && hw <= 16384 && hh <= 16384 && hp.size() >= size_t(hw) * hh * 4;
+            tx.pending = r == 2;
+            if (hd && !UploadReplacement(tx, d, hp, hw, hh)) {
+                textures_.erase(key);
+                return nullptr;
+            }
+            if (!hd && (changed || tx.hd)) {
+                if (tx.hd) {   // back to the game's own: the resource is the guest's size and format again
+                    uint64_t keep_sig = tx.sig, keep_frame = tx.frame, keep_pal = tx.palette;
+                    if (!CreateTexture(tx, d, fi, key)) return nullptr;
+                    tx.sig = keep_sig;
+                    tx.frame = keep_frame;
+                    tx.palette = keep_pal;
+                    same = false;
+                }
+                UploadTexture(tx, d, fi, p, palette.va ? palette.colours : nullptr, same);
+            }
         }
     }
     FillTextureView(tx, d, stages.sv[stage]);
@@ -2197,6 +2281,12 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
+    }
+    // SG1 wide fill: only draws to a back buffer sized target (not shadow maps or other render textures)
+    c.ystretch[0] = 0.0f;
+    if (g_fill_window.load() && size.w == guest_w_ && size.h == guest_h_ && guest_w_ && guest_h_) {
+        float k = g_display_aspect.load() * float(guest_h_) / float(guest_w_);
+        if (k > 1.001f || k < 0.999f) c.ystretch[0] = k;
     }
     std::memcpy(dc.cpu, &c, sizeof(c));
     cl_->SetGraphicsRootConstantBufferView(0, vc.gpu);
@@ -2847,6 +2937,9 @@ void D3D12Backend::BlitFrame(Target& t) {
     float aspect = wide ? 16.0f / 9.0f : 4.0f / 3.0f;
     float w = float(bb_w_);
     float h = float(bb_h_);
+    // SG1 wide fill: the whole window, any aspect (ultrawide too)
+    if (g_fill_window.load() && w > 0 && h > 0) aspect = std::clamp(w / h, 1.0f, 4.0f);
+    g_display_aspect = aspect;
     float vw = std::min(w, h * aspect);
     float vh = vw / aspect;
     float uv[4] = {0, 0, 1, 1};

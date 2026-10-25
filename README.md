@@ -1,88 +1,159 @@
-# Xbox XBE Recomp
+# Stargate SG-1: The Alliance - Xbox static recompilation
 
-A tool for creating unofficial native PC ports of original Xbox games. Games are statically recompiled from their x86 XBE into native 64 bit Windows executables. The game's x86 code is translated to C++ ahead of time. The Xbox kernel and the XDK libraries (Direct3D 8, DirectSound, XAPI, XNet) are implemented at the API level on Windows. Everything is drawn with a native Direct3D 12 renderer and played through XAudio2.
+![Stargate SG-1: The Alliance running natively on Windows](docs/screenshots/sg1_alliance_recomp.png)
 
-This tool was originally created for porting [Tom Clancy's Splinter Cell: Double Agent](https://github.com/TGP482/SCDoubleAgent-XBERecomp) and was later used to port:
-- [BLACK](https://github.com/TGP482/BLACK-XBERecomp)
-- [007: From Russia With Love](https://github.com/TGP482/007FRWL-XBERecomp)
+A work-in-progress native Windows port of the unreleased Xbox game *Stargate SG-1: The Alliance* (Unreal Engine 2, XDK 5849). This repository is a fork of [TGP482/XboxXBERecomp](https://github.com/TGP482/XboxXBERecomp): the SDK is at the top level (its own README is [README-XboxXBERecomp.md](README-XboxXBERecomp.md)) with a few changes for this game, and the game itself is in [`games/sg1`](games/sg1). The game's x86 code is recompiled to native x64 code. The Xbox's Direct3D 8 calls are carried out by a Direct3D 12 renderer, its sound by XAudio2, and its controllers by SDL3.
 
-> [!NOTE]
-> This project does not include any game assets. You must provide the files from your own legally acquired copy of the game to install or build.
+**No game files, no recompiled game code and no executables are in this repository.** You need your own copy of the game. The build recompiles your own `default.xbe` on your machine.
 
-## Installation
+> The first version of this port was built on [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp), with an emulated NV2A GPU translated to Direct3D 11. This version replaces it. The new engine is much faster (hundreds of fps instead of 25-35) and fixes several of the old renderer's problems, such as the M17 alarm beacons and the crash on "Exit to main menu".
 
-- Put this repository in your game repository as `sdk/`. This can be a copy or a submodule.
-- In the game's `CMakeLists.txt`:
-   ```cmake
-   include(sdk/cmake/XbeRecomp.cmake)
-   file(GLOB XBE_HOST_SOURCES CONFIGURE_DEPENDS src/*/*.cpp)
-   list(FILTER XBE_HOST_SOURCES EXCLUDE REGEX "/src/game/")
-   add_xbe_image(MyGame default.xbe game.toml 128 game)
+## Status
+Boots Unreal Engine 2, plays the animated main menu, and has sound, keyboard, mouse and gamepad. Profiles can be created, and story and multiplayer maps load and play. On top of the game itself:
+- an in-game settings menu (Insert): mouse, FOV, widescreen, display mode and resolution, HD textures
+- a voice command menu (V)
+- widescreen and ultrawide (the 3D view is drawn for the window's shape, Hor+)
+- the HD texture pack and your own textures
+- the game script fixes and the co-op / multiplayer script fixes from the first port
+
+Known gaps:
+- The sand floor on some maps is blurry: the game stretches a small texture over it (it looks the same on the Xbox).
+- Menus, videos and other 2D are stretched to the window's shape on a wide screen. The HUD keeps its 4:3 layout in the middle of the screen.
+- The first time an effect is drawn the game can stutter briefly while the renderer prepares it.
+- Co-op over the network has not been tested with the new engine yet.
+
+## Layout
+- `runtime/`, `tools/`, `xdk/`, `cmake/` ... - the XboxXBERecomp SDK. Our changes to it are in `runtime/gpu/` (widescreen fill and HD texture replacement in `d3d12.cpp`, `shaders.cpp`, `shaders.h`, `ext.h`) and `runtime/core/log.h` (full logging with `XBE_VERBOSE`).
+- `games/sg1/` - the game:
+  - `src/game/`:
+    - `hooks.cpp` - crash workarounds and fixes to the game's code
+    - `kbm.cpp` - keyboard and mouse, the menu cursor, console commands (FOV)
+    - `menus.cpp` - the Insert settings menu and the V voice menu
+    - `texpack.cpp` - the HD texture pack and custom textures
+    - `wide.cpp` - widescreen for the gun, hands and HUD
+    - `nonlocal.cpp` - `setjmp` / `longjmp` (a texture that will not decode crashed some maps)
+  - `src/common/game_info.cpp` - the game's settings and its hooks into the SDK
+  - `config/game.toml` - the recompiler config: the game's functions, data and instruction hooks
+  - `tools/` - tools for your game files:
+    - `setup_game_files.py` - the game script fixes (see Quick start)
+    - `make_hdpack.py` - builds the HD texture pack
+    - `multiplayer/` - the co-op and multiplayer script fixes
+    - the individual script patches (the setup runs them for you)
+  - `build.bat`, `release.bat`, `make_texpack.bat`, `run_verbose.bat`
+
+## Quick start
+You need:
+- Windows 10/11 and a GPU with Direct3D 12
+- [Visual Studio 2022](https://visualstudio.microsoft.com/) with "Desktop development with C++" (`build.bat` offers to add the Clang and CMake components it needs)
+- [Git](https://git-scm.com/download/win)
+- [Python 3](https://www.python.org/downloads/) (tick "Add to PATH"), for the game file fixes and the HD texture pack
+- your own copy of the game, extracted from your disc image (a folder with `default.xbe`, `System\`, `Maps\`, `Textures\` ...)
+
+1. Clone this repository:
    ```
-- Build with Clang and Ninja (`clang++`, `-fuse-ld=lld`). Zydis, toml++, Dear ImGui and SDL3 are fetched by CMake.
-
-## Game Setup
-
-1. Copy `templates/game` to a new repository and put this SDK in it as `sdk/`. Set `GAME_TITLE`, `GAME_XBE` and `GAME_EXE` at the top of `build.bat` (`GAME_EXE` in `release.bat` too), and the target and xbe in `add_xbe_image` in `CMakeLists.txt`.
-2. Put the game's XBE and its data folders in the `assets` folder. No game files, keys or generated code belong in any repository.
-3. Run `xbe_symbols`, which `build.bat` does on the first build:
+   git clone https://github.com/SinonVT/Stargate-SG-1-The-Alliance-recomp
+   cd Stargate-SG-1-The-Alliance-recomp\games\sg1
    ```
-   xbe_symbols assets\default.xbe sdk\xdk --library MyGame.dll --out config\game.toml
+   Everything below happens in `games\sg1`.
+2. Copy your whole game folder's contents into `assets\`, so that you have `assets\default.xbe`, `assets\System\` and so on.
+3. Apply the game file fixes. They change only your copy in `assets\` and keep backups:
    ```
-   This prints the XBE's library versions, picks `xdk/<build>/signatures.toml` and finds the XDK functions and data the host replaces, then writes the config: `[xbe]` with a partition count and the code sections, the `layout.toml` include, `[symbols]` and `[data]`. Misses and ambiguous names are listed and left at 0, which become trapping stubs. It stops when no `signatures.toml` exists for the XBE's build.
-4. Fill in `app::kGame` in `src/common/game_info.cpp`: title, window name, log and settings file names, splash, the xbe to exe table, game options, and the hooks for loading, the window, drawing and the pads.
-5. Game hooks go in `src/game`. Define `X86_FUNC(sub_XXXXXXXX)` to replace a recompiled function, and call `__imp__sub_XXXXXXXX` to reach the original. `python sdk/tools/symbols/xbe2pe.py config/game.toml game.exe` writes a flat PE with the recompiled functions as exports for Ghidra.
-6. Run `build.bat`. One game repo can build several images, one config and `add_xbe_image` each; `--name` sets the config's `generated/<name>`, which is the folder argument of `add_xbe_image`.
+   py tools\setup_game_files.py
+   ```
+4. Build:
+   ```
+   build.bat
+   ```
+   The first time it recompiles the game, which takes 30 to 90 minutes. Later builds only compile what changed.
+5. Play: `out\build\release\SG1.exe` (`build.bat` offers to start it). The first start finishes building the game code, `SG1.dll`, which takes a few minutes once.
+6. Optional: the HD texture pack, see below.
 
-A new XDK build needs `xdk/<build>/layout.toml` and signatures made from titles whose configs are complete: `xbe_symbols --sign config/a.toml [config/b.toml] --out sdk/xdk/<build>/signatures.toml`. Signatures are lengths and hashes of the functions with addresses masked, never library code.
+`release.bat` makes a zip that others can play from. It holds no game code: the player puts their own game in its `assets` folder and the first start builds the game code from it.
 
-## Features
+**New Game.** The game asks for a map called `Tutorial ` (Yes) or `M01A` (No) that the dump does not contain, and it freezes if they are missing. `M00.unr` is the tutorial level, so the setup creates `Maps\Tutorial .unr` (the real tutorial) and `Maps\M01A.unr` (a copy of `M02A.unr`: the real first mission is missing, so No starts mission 2 instead). It also writes two silent placeholder tracks, `Music\multiplayer\multiplayer_music1.WAV` and `...2.WAV`, which the dump does not contain. Without them deathmatch asks for the tracks every ~100 ms and stutters. Existing files are never overwritten.
 
-### Recompiler
-- **Function Discovery** - Finds every function in the XBE by following direct calls, code pointers and the gaps between known functions.
-- **Jump Tables** - Resolves switch tables of every form the Xbox compiler writes, including byte indexed and backwards tables, memcpy tables and copy sleds.
-- **C++ Exceptions** - Supports C++ exceptions, with try and catch blocks working as on the Xbox.
-- **x87, SSE and MMX** - Translates x87, SSE and MMX instructions, with the x87 register stack tracked at run time.
-- **Overridable Functions** - Makes every recompiled function replaceable, allowing a game to override any of them without editing generated code.
-- **Instruction Hooks** - Adds `[[hook]]`, which calls a game function before or after any instruction, and can return from or jump within the function.
-- **Analysis Overrides** - Adds `[[function]]`, `[[switch]]` and `[xbe] data_ranges` to add functions, set switch targets and mark data the analysis gets wrong.
-- **Incremental Builds** - Only rewrites generated files when their content changes, keeping rebuilds fast.
-- **Game Code on the Player's PC** - Builds the recompiled code into `<exe>.dll` on the first start of a release, from the player's own XBE, with the bundled recompiler, Clang and LLD behind a progress window. A release ships no game code.
-- **XDK Signatures** - Finds the XDK functions and data in a new game automatically and writes its config.
-- **LTCG Libraries** - Supports games built with link time code generation, where library functions take their arguments in registers.
+**Keyboard layout.** The dump's `System\User.ini` has the PC prototype layout (B unbound, Ctrl = jump ...). The setup runs `tools\controls_preset.py`, which sets this port's layout (below) and the voice command keys (backups `*.orig_sg1`, `--revert` restores them).
 
-### CPU and Kernel
-- **Guest Calls** - Adds indirect calls and host calls into game code, with the Xbox's 733 MHz timer and Pentium III CPUID.
-- **x87 Precision** - Follows the game's x87 precision setting, giving the same results as on the Xbox.
-- **CRT Math** - Computes the game's math functions on the host, fixing math that returned invalid results at random.
-- **Kernel** - Implements threads, waits, files, memory, crypto and EEPROM settings, with game files read from host folders or a disc image.
-- **Image Switching** - Relaunches into the matching executable when the game loads another XBE, keeping the window on screen without a gap.
+**What else the setup fixes in the game's scripts.** Each fix has its own tool in `tools\`, keeps a backup and has a `--revert`:
+- the stargate in the main menu that never closes
+- non-team chat, the Last Man Standing menu entry and the missing `Replicator.ini`
+- the health bar in story mode
+- the player name from the selected profile
+- higher graphics settings (textures High, weather and high detail actors on)
+- the co-op / multiplayer fixes (`--no-multiplayer` skips them, see `tools\multiplayer\README.md`)
 
-### Graphics
-- **Direct3D 8** - Implements Direct3D 8 as the XDK does it, including immediate mode draws, palettes, gamma ramps and Direct3D code built into the game.
-- **Native Direct3D 12 Renderer** - Translates the Xbox's vertex programs, pixel combiners and fixed function pipeline to HLSL, with rendering on its own thread.
-- **Renderer Extensions** - Allows a game to change render targets, add passes and add to the generated shaders through `gpu::Extension`, set with `gpu::SetExtension` from `GameInfo::init`.
+**Optional: grass.** The Xbox build cut the terrain grass from the first level, but the engine support and the grass model are still there. To add it, close the game and run `py tools\install_grass.py assets` (or `install_grass.bat`). It only edits `Maps\M01A.unr` (backup `M01A.unr.nograss`); options are `--scale 0.3 --dens 0.25`, and `--undo` restores the plain map.
 
-### Audio
-- **DirectSound** - Mixes sound in software through XAudio2, with Xbox ADPCM, streams, mix bins and the effects image.
+## HD texture pack
+The game only uploads reduced copies of its textures, but the original art (up to 1024 or 2048 px) is still in `Textures\*.utx`. The pack is built from your own game files, so it is not in the repository (about 850 MB).
 
-### Input
-- **Controller** - Supports Xbox, PlayStation and Switch controllers through SDL3, with hot plugging and rumble.
+Run `make_texpack.bat`, or press "Extract HD textures" in the Insert menu. It needs Python 3 and installs numpy and Pillow if they are missing. It writes `out\build\release\texpack\hd\*.png` and `texpack\index.txt` in a few minutes; if it is stopped, running it again resumes. Press "Reload textures" in the Insert menu when it says DONE. The default size cap is 1024 px per texture; pass another as an argument (`make_texpack.bat 512`) if a level runs out of video memory.
 
-### General
-- **Disc Images** - Runs the game from an ISO in the `assets` folder, either a whole disc dump or the game partition, or from the extracted data files.
-- **System Link** - System Link can be played over LAN, or by directly connecting to a friend's IP address.
-- **Bink Movies** - Fixes Bink movies playing too fast above 30 FPS and crashing on fast reads, for games that use Bink.
-- **Crash Dumps** - Writes crash dumps to a `CrashDumps` folder beside the exe.
+Textures load in the background, so one can sharpen a moment after it first appears.
 
-### Miscellaneous
-- **Boot Splash** - Place a `splash.png` (or `.bmp`) beside the exe to display a splash screen at launch.
-- **Diagnostics** - Logs frame timing with `XBE_PERF`, captures a frame with F3 when `XBE_CAPTURE_DIR` is set and enables the Direct3D 12 debug layer with `XBE_D3D12_DEBUG`.
-- **Headless Harness** - Builds and runs a game on Linux without a window, GPU, audio or controller, for testing.
-- **SDK Sync** - Keeps the `sdk/` copies in game repositories in step with this repository.
+**Your own textures.** Put a PNG in `texpack\custom` with the same file name as one in `texpack\hd`. You can also name it after the texture's ID, `f<format>_<width>x<height>_<hash>.png`, which also works for textures the pack does not cover. Files in `custom` win over the pack while "Custom textures" is on in the Insert menu (it is on by default). Delete a file to go back. `texpack\upscale_dump.bat` runs Real-ESRGAN over the whole `hd` folder into `custom`, if you have it.
+
+## Widescreen / ultrawide
+With "Fill the window" on (the default), the 3D view is drawn for the window's shape at any aspect: 16:9, 21:9, 32:9. The game has no widescreen support of its own, so the port widens the field of view (Hor+: the vertical view stays what 4:3 gave). It also widens the gun, the hands and the HUD to match. The FOV is typed into the game's console about 3 seconds after you are in a level with no menu up, and again when the window changes shape; the game saves it in `System\User.ini`. Menus, videos and 2D are stretched to the window. Turn "Fill the window" off for the original 4:3 picture.
+
+## In-game settings (Insert)
+Insert (or Esc) opens and closes the settings menu. The game gets no keyboard or mouse while it is open. Settings are saved to `out\build\release\settings.toml`.
+- **Mouse:** look sensitivity (default 50, PgUp/PgDn change it in game), menu cursor speed, invert Y.
+- **Widescreen / field of view:** fill the window, FOV at 4:3 (default 75), Hor+, "Apply now".
+- **Textures:** HD texture pack, custom textures, Extract HD textures, Reload textures.
+- **Display:**
+  - display mode (Windowed, Borderless or Fullscreen; the first start is Windowed)
+  - resolution
+  - render scale (100 = native, up to 400 for supersampling)
+  - FPS cap and VSync
+  - anisotropic filtering
+
+  A maximized window stays maximized, also across "Exit to main menu", which restarts the game.
+
+## Voice commands (V)
+In a match, V opens the voice menu: the mouse wheel picks a line and left click says it (the click does not fire). V again or Esc closes it. Each line presses a key whose `User.ini` binding is `Taunt <MSGID>` (NumPad0-9 and F13-F18, set by `controls_preset.py`); you can bind those keys yourself too. The lines are only the ones all four SG-1 voice packs have: taunt, OK, negative, ready, enemy spotted, take cover, enemy killed, area clear, under fire, team under fire, man down, in cover, holding fire, firing, friendly fire.
+
+## Controls
+In a match the keyboard and mouse go to the game through its own bindings in `System\User.ini`. The layout from `tools\controls_preset.py` (backups `*.orig_sg1`):
+
+| Action | Keys |
+|---|---|
+| Move | W/A/S/D |
+| Jump | Space |
+| Duck | Ctrl or C |
+| Walk | Shift |
+| Reload | R |
+| Use | F or Enter |
+| Weapons | number keys (5 = binoculars), mouse wheel cycles |
+| Fire / alt-fire | left / right mouse |
+| Zoom | middle mouse or Z |
+| Third person | B |
+| Cloak | CapsLock |
+| Mission information | Tab |
+| Chat / team chat | T / Y |
+
+Team commands: **Q = Concentrate Fire** (hold it, look at a squad mate or an enemy, release) and **E = Take Cover**. They need a squad, so they do nothing in deathmatch.
+
+In menus the mouse drives the game's own cursor: left click selects, right click goes back.
+
+Port keys:
+
+| Key | What it does |
+|---|---|
+| Insert | Opens and closes the settings menu |
+| V | Opens and closes the voice menu |
+| ` (backtick) | Opens the game console |
+| F9 | Frees or captures the mouse |
+| PgUp / PgDn | Mouse sensitivity |
+| F10 / F11 / F12 | The game's own Gamma + / Brightness + / Contrast + |
+
+## Reporting a crash
+Start the game with `run_verbose.bat` and do the same thing again. Then open an issue and attach the newest `game_*.log` from `out\build\release\logs`, plus the dump from `out\build\release\CrashDumps` if there is one. Say which map you were on and what you were doing.
 
 ## Credits
+- Built on [TGP482/XboxXBERecomp](https://github.com/TGP482/XboxXBERecomp) (MIT, see `LICENSE`): the recompiler, the runtime and the Direct3D 12 renderer. Its third-party libraries are listed in `THIRD_PARTY.txt`.
+- The first port, built on [sp00nznet/xboxrecomp](https://github.com/sp00nznet/xboxrecomp), is where many of the fixes carried over here were found.
+- This is not an official project and has no affiliation with the game's rights holders.
 
-- [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) for the overridable function layout and instruction hooks this follows.
-- [Zydis](https://github.com/zyantific/zydis) for decoding x86 instructions, [toml++](https://github.com/marzer/tomlplusplus) for the configs, [Dear ImGui](https://github.com/ocornut/imgui) for the settings overlay and [SDL](https://github.com/libsdl-org/SDL) for the window, input and controllers.
-- [xemu](https://github.com/xemu-project/xemu) and [Cxbx-Reloaded](https://github.com/Cxbx-Reloaded/Cxbx-Reloaded) as references for the Xbox's hardware and API behaviour. This project does not use emulation or any emulator code.
+---
+<sub>*AI was used to assist with my project, but I put a lot of effort into guiding and using it for advice with crashes and other issues to help complete this project. Thank you.*</sub>
