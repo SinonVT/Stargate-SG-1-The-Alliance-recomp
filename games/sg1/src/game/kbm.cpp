@@ -90,7 +90,7 @@ bool g_typing = false;        // chat or console line open: V and the rest are l
 // held while the key is down, and for at least kPadTapMs so a quick tap is not missed between two polls
 constexpr uint32_t kPadTapMs = 100;
 std::atomic<bool> g_pad_start_held{false}, g_pad_back_held{false};
-std::atomic<uint32_t> g_pad_start_until{0}, g_pad_back_until{0};
+std::atomic<uint64_t> g_pad_start_until{0}, g_pad_back_until{0};  // GetTickCount64 deadlines, 0 = none
 bool g_lb_suppress = false;   // the voice menu took a left press: its release stays away from the game too
 std::deque<std::string> g_cmds;  // console commands waiting to be typed, one after another
 
@@ -156,9 +156,11 @@ void SetOverlay(bool on) {
 void OnPad(int port, input::Pad& pad) {
     if (port == 0) {
         pad.connected = true;
-        uint32_t now = GetTickCount();
-        if (g_pad_start_held.load() || int32_t(g_pad_start_until.load() - now) > 0) pad.buttons |= 0x10;  // Start
-        if (g_pad_back_held.load() || int32_t(g_pad_back_until.load() - now) > 0) pad.buttons |= 0x20;    // Back
+        // 64-bit ticks: with 32-bit ones an unset deadline read as "still to come" once Windows had been up 24.8 days,
+        // so Start and Back stayed held (every cutscene line was skipped)
+        uint64_t now = GetTickCount64();
+        if (g_pad_start_held.load() || now < g_pad_start_until.load()) pad.buttons |= 0x10;  // Start
+        if (g_pad_back_held.load() || now < g_pad_back_until.load()) pad.buttons |= 0x20;    // Back
     }
     if (!g_overlay.load()) return;
     bool connected = pad.connected;
@@ -319,8 +321,8 @@ bool OnMessage(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* re
         bool menu = g_in_menu.load();
         // Esc in play = Start (pause menu); in a game menu it stays Esc (back). Tab = Back (objectives), in menus too.
         if (!rep && !g_typing && g_active) {
-            if (vk == VK_ESCAPE && !menu) { g_pad_start_held = true; g_pad_start_until = GetTickCount() + kPadTapMs; return false; }
-            if (vk == VK_TAB) { g_pad_back_held = true; g_pad_back_until = GetTickCount() + kPadTapMs; return false; }
+            if (vk == VK_ESCAPE && !menu) { g_pad_start_held = true; g_pad_start_until = GetTickCount64() + kPadTapMs; return false; }
+            if (vk == VK_TAB) { g_pad_back_held = true; g_pad_back_until = GetTickCount64() + kPadTapMs; return false; }
         }
         if (!rep && !menu) {
             if (vk == 'V' && !g_typing) {   // the voice menu instead of CallForHelp
