@@ -48,6 +48,8 @@ step('Game script fixes (teamsay, Last Man Standing, Replicator.ini)', 'patches/
 step('Health bar in story mode (StargateGame.u)', 'patch_health_bar.py', game)
 # the staff's right-click melee animation exists only in the Jaffa set: the SG-1 team, Walter, Jacob and the Tok'ra swung without one
 step('Staff melee animation for everyone (StargateGame.u)', 'patch_staff_melee.py', game)
+# pressing skip in a cutscene only faded the screen: the 8x fast forward behind the fade was commented out
+step('Cutscene skip (StargateGame.u)', 'patch_cutscene_skip.py', game)
 # the selected profile's name goes into the join URL, so the player is named after the profile
 step('Player name from the selected profile (Engine.u)', 'patch_profile_name.py', game)
 # texture detail High, weather and high detail actors on (only changes the Xbox defaults)
