@@ -17,7 +17,6 @@ Boots Unreal Engine 2, plays the animated main menu, and has sound, keyboard, mo
 - the game script fixes and the co-op / multiplayer script fixes from the first port
 
 Known gaps:
-- The sand floor on some maps is blurry: the game stretches a small texture over it (it looks the same on the Xbox).
 - Menus, videos and other 2D are stretched to the window's shape on a wide screen. The HUD keeps its 4:3 layout in the middle of the screen.
 - The first time an effect is drawn the game can stutter briefly while the renderer prepares it.
 - Co-op over the network has not been tested with the new engine yet.
