@@ -7,6 +7,7 @@ The dump's default layout is the PC prototype layout (Ctrl=Jump, Alt=Fire, Z=Str
     Q = ConcentrateFire (team command: hold, look at a squad mate or an enemy, release)    E = OrderTakeCover (team command)
     NumPad0-6/8/9, F13-F18 = voice lines (not NumPad7: it opens the console) (Taunt MSGID_...), pressed by the V voice menu
     Tab = unbound (the dump binds it to 'Type', which opened the console); the port presses the controller's Back for Tab, which opens the mission info
+    Enter = also skips a cutscene (Use as before; SkipMatinee only acts while a camera scene runs)
     Joy3 (X, the cutscene skip) = the dump's 'use | SkipMatinee | forcereload' (an earlier version added 'Button bSkipMatinee':
     that is the old skip, which also broke the scripted sequences after the cutscene; the skip is patch_cutscene_skip.py)
     Escape = unbound (the dump binds it to 'Pause', which froze the game without a menu); the port presses the controller's Start for Esc in play, which opens the pause menu
@@ -25,7 +26,7 @@ a = [x for x in sys.argv[1:]]
 if not a or a[0].startswith('--'): print(__doc__); sys.exit(1)
 sysdir = os.path.join(a[0].strip('"'), 'System'); revert = '--revert' in a
 KEYS = [('Ctrl', 'Duck'), ('Alt', 'SwitchToLastWeapon'), ('MiddleMouse', 'ZoomToggle'), ('CapsLock', 'toggleInvisibility'), ('Z', 'ZoomToggle'), ('Backspace', ''), ('B', 'ToggleBehindView'), ('Q', 'ConcentrateFire'), ('E', 'OrderTakeCover'), ('Tab', ''), ('Escape', ''),
-        ('Joy3', 'use | SkipMatinee | forcereload')] + [(k, 'Taunt ' + v) for k, v in (   # voice lines for the V voice menu (fb_present.c) and patch_coop_voicetaunt.py
+        ('Joy3', 'use | SkipMatinee | forcereload'), ('Space', 'Jump'), ('Enter', 'Use | SkipMatinee')] + [(k, 'Taunt ' + v) for k, v in (   # voice lines for the V voice menu (fb_present.c) and patch_coop_voicetaunt.py
     ('NumPad1', 'MSGID_Taunt'), ('NumPad2', 'MSGID_Ok'), ('NumPad3', 'MSGID_NotOk'), ('NumPad4', 'MSGID_Ready'), ('NumPad5', 'MSGID_SpotEnemy'),
     ('NumPad6', 'MSGID_TakeCover'), ('F18', 'MSGID_EnemyKilled'), ('NumPad8', 'MSGID_AllEnemiesKilled'), ('NumPad9', 'MSGID_UnderFire'),
     ('NumPad0', 'MSGID_TeamUnderFire'), ('F13', 'MSGID_ManDown'), ('F14', 'MSGID_InCoverPosition'), ('F15', 'MSGID_HoldingFire'),
