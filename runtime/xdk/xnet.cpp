@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cwchar>
 #include <random>
 
 #include "app/app.h"
@@ -54,6 +55,7 @@ struct Socket {
     bool udp = false;
     bool nonblocking = false;  // the guest's FIONBIO; the host socket is always nonblocking
     uint16_t port = 0;         // bound, network order
+    HANDLE port_lock = nullptr;  // UDP: the named mutex that keeps this port to this copy of the game (see bind)
 };
 
 struct Span {
@@ -355,7 +357,10 @@ namespace xnet {
 
 void CloseSockets() {
     std::lock_guard<std::mutex> lock(g_lock);
-    for (auto& [id, socket] : g_sockets) ::closesocket(socket.s);
+    for (auto& [id, socket] : g_sockets) {
+        ::closesocket(socket.s);
+        if (socket.port_lock) CloseHandle(socket.port_lock);
+    }
     g_sockets.clear();
     g_pending.clear();
 }
@@ -495,6 +500,7 @@ HLE_STDCALL(closesocket, 1) {
             i++;
     }
     ::closesocket(it->second.s);
+    if (it->second.port_lock) CloseHandle(it->second.port_lock);
     g_sockets.erase(it);
     return 0;
 }
@@ -519,6 +525,8 @@ HLE_STDCALL(ioctlsocket, 3) {
 HLE_STDCALL(setsockopt, 5) {
     Socket k = Find(a[0]);
     if (k.s == INVALID_SOCKET) return Fail(WSAENOTSOCK);
+    // UDP ports are not shared between copies of the game (see bind)
+    if (k.udp && a[1] == SOL_SOCKET && a[2] == SO_REUSEADDR) return 0;
     if (::setsockopt(k.s, int(a[1]), int(a[2]), static_cast<const char*>(HostPtr(a[3])), int(a[4])) == 0) return 0;
     LOG_FIRST(10, "xnet: setsockopt %X level %X option %X ignored (%d)", a[0], a[1], a[2], WSAGetLastError());
     return 0;
@@ -546,8 +554,27 @@ HLE_STDCALL(bind, 3) {
     if (k.s == INVALID_SOCKET) return Fail(WSAENOTSOCK);
     sockaddr_in at = GuestAddr(a[1]);
     if (g_instance && at.sin_addr.s_addr == INADDR_ANY) at.sin_addr.s_addr = g_local;
+    // Several copies on one PC share its address, and the game's client socket asks for port 1000 with
+    // SO_REUSEADDR. Shared, a later player's socket got the earlier one's port: the host took both for one
+    // connection, the later one never got an answer and the game retried the join forever. Windows' rules for a
+    // port taken without SO_REUSEADDR depend on the options of the socket that has it, so the copies keep each UDP
+    // port they bind with a named mutex instead: a port another copy has fails with WSAEADDRINUSE, and the game
+    // tries its next one (1001, 1002...), which the host answers to.
+    uint16_t want = ntohs(at.sin_port);
+    HANDLE port_lock = nullptr;
+    if (k.udp && want) {
+        wchar_t name[64];
+        std::swprintf(name, 64, L"Local\\xbe-xnet-udp-%08X-%u", unsigned(at.sin_addr.s_addr), unsigned(want));
+        port_lock = CreateMutexW(nullptr, FALSE, name);
+        if (port_lock && GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(port_lock);
+            LOGI("xnet: port %u is in use by another copy of the game", want);
+            return Fail(WSAEADDRINUSE);
+        }
+    }
     if (::bind(k.s, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0) {
         int e = HostError();
+        if (port_lock) CloseHandle(port_lock);
         LOGW("xnet: bind %X to %s failed (%d)", a[0], Addr(at).c_str(), e);
         return Fail(e);
     }
@@ -556,7 +583,13 @@ HLE_STDCALL(bind, 3) {
     int len = sizeof(me);
     ::getsockname(k.s, reinterpret_cast<sockaddr*>(&me), &len);
     std::lock_guard<std::mutex> lock(g_lock);
-    if (auto it = g_sockets.find(a[0]); it != g_sockets.end()) it->second.port = me.sin_port;
+    if (auto it = g_sockets.find(a[0]); it != g_sockets.end()) {
+        it->second.port = me.sin_port;
+        if (it->second.port_lock) CloseHandle(it->second.port_lock);
+        it->second.port_lock = port_lock;
+    } else if (port_lock) {
+        CloseHandle(port_lock);
+    }
     return 0;
 }
 HLE_STDCALL(connect, 3) {
