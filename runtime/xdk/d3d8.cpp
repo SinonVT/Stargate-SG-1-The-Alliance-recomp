@@ -589,6 +589,36 @@ HLE_STDCALL(D3DDevice_GetDepthStencilSurface2, 0) {
 
 namespace {
 std::atomic<uint32_t> g_presents{0};
+
+// XBE_PERF: a title frame (Swap to Swap) much longer than the ones around it is logged (shown without XBE_VERBOSE)
+// split into the game's own work, its waits on the render thread and the GPU, and the frame rate cap's sleep
+void LogTitleHitch(std::chrono::steady_clock::time_point present, std::chrono::steady_clock::time_point pace) {
+    using clock = std::chrono::steady_clock;
+    auto ms = [](clock::time_point a, clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    static clock::time_point last_end{};
+    static double usual = 16.0;
+    static uint64_t last_wait[6] = {};
+    auto end = clock::now();
+    uint64_t wait[6];
+    double waited[6];
+    for (int i = 0; i < 6; i++) {
+        wait[i] = gpu::g_hitch_wait_ns[i].load();
+        waited[i] = (wait[i] - last_wait[i]) / 1e6;
+        last_wait[i] = wait[i];
+    }
+    if (last_end != clock::time_point{}) {
+        double frame = ms(last_end, end), game = ms(last_end, present), swap = ms(present, pace), cap = ms(pace, end);
+        double in_game = waited[0] + waited[1] + waited[2] + waited[3] + waited[4];
+        if (frame > 25.0 && frame > usual * 2.0) {
+            LOGR("hitch: title frame %.1f ms (usual %.1f) | game %.1f ms (of it waiting %.1f: read-back %.1f resource "
+                 "%.1f fence %.1f flush %.1f copy %.1f) | present %.1f ms (previous frame %.1f) | cap sleep %.1f ms",
+                 frame, usual, game, in_game, waited[0], waited[1], waited[2], waited[3], waited[4], swap, waited[5],
+                 cap);
+        }
+        usual = usual * 0.95 + std::min(frame, usual * 2.0) * 0.05;
+    }
+    last_end = end;
+}
 }  // namespace
 
 HLE_STDCALL(D3DDevice_Swap, 1) {
@@ -615,8 +645,11 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
         }
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
+    auto hitch_present = std::chrono::steady_clock::now();
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    auto hitch_pace = std::chrono::steady_clock::now();
     app::Pace();
+    if (diag::Perf()) LogTitleHitch(hitch_present, hitch_pace);
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {

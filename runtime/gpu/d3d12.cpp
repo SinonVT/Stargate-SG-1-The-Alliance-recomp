@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -97,6 +98,11 @@ struct Perf {
     uint64_t shaders = 0;
     uint64_t raw = 0;
     uint64_t lates = 0;
+    uint64_t hd = 0;  // texture pack images uploaded
+    double shader = 0;  // new shader keys: source made, then loaded or compiled (compile counted in it too)
+    double pso = 0;     // pipeline creation
+    uint64_t disk = 0;  // shaders read from the disk cache file by file (not preloaded)
+    uint64_t preloaded = 0;
 };
 Perf g_perf;
 struct PerfScope {
@@ -767,12 +773,15 @@ private:
     uint64_t fps_n_ = 0;
 };
 
+void StartShaderPreload();  // the disk shader cache, below
+
 bool D3D12Backend::Init(uint32_t width, uint32_t height) {
     guest_w_ = width;
     guest_h_ = height;
     HWND hwnd = static_cast<HWND>(app::Window());
     if (!CreateDevice()) return false;
     if (!CreateSwapChain(hwnd)) return false;
+    StartShaderPreload();
     CreateHeaps();
     CreateBackBufferViews();
     if (!CreateRootSignature()) return false;
@@ -1387,6 +1396,60 @@ bool LoadShaderBlob(const fs::path& path, ComPtr<ID3DBlob>& out) {
     if (!ok) out.Reset();
     return ok;
 }
+// the whole disk cache read once at start on a thread of its own, so a shader seen before costs no file open in play
+// (opening hundreds of small files, each scanned by the virus checker, made the first sight of an effect hitch)
+struct ShaderPreload {
+    std::mutex lock;
+    std::unordered_map<uint64_t, std::vector<uint8_t>> blobs;
+};
+ShaderPreload& Preloaded() {
+    static ShaderPreload p;
+    return p;
+}
+void StartShaderPreload() {
+    fs::path dir = ShaderCachePath(0).parent_path();
+    if (dir.empty()) return;
+    std::thread([dir] {
+        char suffix[32];
+        std::snprintf(suffix, sizeof suffix, "_o1_v%u.cso", kShaderCacheVersion);
+        std::error_code ec;
+        size_t n = 0;
+        for (const auto& e : fs::directory_iterator(dir, ec)) {
+            std::string name = e.path().filename().string();
+            if (name.size() != 16 + std::strlen(suffix) || name.compare(16, std::string::npos, suffix)) continue;
+            uint64_t hash = std::strtoull(name.substr(0, 16).c_str(), nullptr, 16);
+            FILE* f = _wfopen(e.path().c_str(), L"rb");
+            if (!f) continue;
+            std::vector<uint8_t> data;
+            std::fseek(f, 0, SEEK_END);
+            long size = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (size > 0) {
+                data.resize(size_t(size));
+                if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
+            }
+            std::fclose(f);
+            if (data.empty()) continue;
+            std::lock_guard<std::mutex> l(Preloaded().lock);
+            Preloaded().blobs.emplace(hash, std::move(data));
+            n++;
+        }
+        LOGI("d3d12: %zu cached shaders preloaded", n);
+    }).detach();
+}
+bool TakePreloaded(uint64_t hash, ComPtr<ID3DBlob>& out) {
+    std::vector<uint8_t> data;
+    {
+        std::lock_guard<std::mutex> l(Preloaded().lock);
+        auto it = Preloaded().blobs.find(hash);
+        if (it == Preloaded().blobs.end()) return false;
+        data.swap(it->second);
+        Preloaded().blobs.erase(it);
+    }
+    if (FAILED(D3DCreateBlob(data.size(), &out))) return false;
+    std::memcpy(out->GetBufferPointer(), data.data(), data.size());
+    return true;
+}
 void SaveShaderBlob(const fs::path& path, ID3DBlob* blob) {
     // written beside, then renamed: a start that ends mid-write leaves no half file
     fs::path tmp = path;
@@ -1411,8 +1474,14 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     ComPtr<ID3DBlob> err;
     // compiled shaders are kept on disk beside the executable, so an effect compiles once, not once per start (a
     // compile is tens of milliseconds: a hitch in play, which also turns mouse movement made during it into a jump)
+    if (TakePreloaded(hash, code)) {
+        g_perf.preloaded++;
+        blobs_[hash] = code;
+        return code.Get();
+    }
     fs::path cached = ShaderCachePath(hash);
     if (!cached.empty() && LoadShaderBlob(cached, code)) {
+        g_perf.disk++;
         blobs_[hash] = code;
         return code.Get();
     }
@@ -1638,6 +1707,7 @@ ID3D12PipelineState* D3D12Backend::EnsurePipeline(const PsoKey& k, ID3DBlob* vs,
     FillPipelineDesc(k, vs, ps, d);
     if (k.topo == uint32_t(Topology::Points)) ExpandPoints(d);
     ComPtr<ID3D12PipelineState> pso;
+    PerfScope perf_pso{g_perf.pso};
     g_perf.psos++;
     if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) LOGE("d3d12: pipeline creation failed");
     psos_[h] = pso;
@@ -1898,6 +1968,7 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(const State& s, int stage, const 
                         ? g_texture_replace(d, p, hp, hw, hh) : 0;
             bool hd = r == 1 && hw && hh && hw <= 16384 && hh <= 16384 && hp.size() >= size_t(hw) * hh * 4;
             tx.pending = r == 2;
+            g_perf.hd += hd;
             if (hd && !UploadReplacement(tx, d, hp, hw, hh)) {
                 textures_.erase(key);
                 return nullptr;
@@ -2070,6 +2141,7 @@ void D3D12Backend::EnsureVertexShader(const State& s, const Assembled& a, DrawSh
         sh.vh = vit->second;
         return;
     }
+    PerfScope perf_shader{g_perf.shader};
     std::string src = VertexHlsl(s, a, sh);
     sh.vs_code = Compile(sh.quad ? QuadHlsl(std::move(src)) : src, "main", "vs_5_0", sh.vh);
     shader_src_[sh.vkey] = sh.vh;
@@ -2100,6 +2172,7 @@ void D3D12Backend::EnsurePixelShader(const PixelKey& pk, DrawShaders& sh) {
         sh.ph = pit->second;
         return;
     }
+    PerfScope perf_shader{g_perf.shader};
     sh.ps_code = Compile(PixelHlsl(pk), "main", "ps_5_0", sh.ph);
     shader_src_[sh.pkey ^ kPixelKeySalt] = sh.ph;
 }
@@ -3397,6 +3470,32 @@ void LogPerf() {
     }
 }
 
+// XBE_PERF: a render thread frame much longer than the ones around it is logged (shown without XBE_VERBOSE) with
+// what that frame did, so a hitch can be told apart: shader compiles, pipeline creation, texture uploads, waits
+Perf g_perf_prev;  // g_perf at the end of the frame before; LogPerf resets g_perf, so it is taken again after it
+void LogHitch() {
+    static PerfClock::time_point last = PerfClock::now();
+    static double usual = 16.0;
+    double ms = PerfMs(last);
+    last = PerfClock::now();
+    const Perf& p = g_perf;
+    const Perf& q = g_perf_prev;
+    if (ms > 25.0 && ms > usual * 2.0) {
+        LOGR("hitch: render frame %.1f ms (usual %.1f) | draws %.1f ms [%llu draws, new shaders %.1f ms (%llu "
+             "compiled in %.1f ms, %llu from disk, %llu preloaded), %llu pipelines %.1f ms; textures %.1f ms: %llu "
+             "uploads %.2f MB, %llu new, %llu HD] clear %.1f copy %.1f read-back %.1f present %.1f [gpu wait %.1f, "
+             "swap %.1f]",
+             ms, usual, p.draw - q.draw, (unsigned long long)(p.draws - q.draws), p.shader - q.shader,
+             (unsigned long long)(p.shaders - q.shaders), p.compile - q.compile, (unsigned long long)(p.disk - q.disk),
+             (unsigned long long)(p.preloaded - q.preloaded), (unsigned long long)(p.psos - q.psos), p.pso - q.pso,
+             p.texup - q.texup,
+             (unsigned long long)(p.texups - q.texups), (p.texup_bytes - q.texup_bytes) / 1048576.0,
+             (unsigned long long)(p.newtex - q.newtex), (unsigned long long)(p.hd - q.hd), p.clear - q.clear,
+             p.copy - q.copy, p.sync - q.sync, p.present - q.present, p.wait - q.wait, p.swap - q.swap);
+    }
+    usual = usual * 0.95 + std::min(ms, usual * 2.0) * 0.05;  // a hitch barely moves it
+}
+
 void D3D12Backend::Present(const Surface& front) {
     PerfScope perf_present{g_perf.present};
     if (cap_) {
@@ -3427,7 +3526,11 @@ void D3D12Backend::Present(const Surface& front) {
     ReleaseOldTextures();
     ResetFrame();
     CountFps();
-    if (diag::Perf()) LogPerf();
+    if (diag::Perf()) {
+        LogHitch();
+        LogPerf();
+        g_perf_prev = g_perf;
+    }
     ApplySettings();
 }
 

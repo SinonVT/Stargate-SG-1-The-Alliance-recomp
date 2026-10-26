@@ -449,6 +449,7 @@ private:
         uint64_t ns = Ns(t);
         g_perf_wait_ns += ns;
         g_perf_wait_kind_ns[size_t(kind)] += ns;
+        g_hitch_wait_ns[size_t(kind)] += ns;
         if (why) {
             g_perf_waits++;
             if (diag::Perf()) LOG_FIRST(32, "render thread: the title waited %.2f ms for a %s", ns / 1e6, why);
