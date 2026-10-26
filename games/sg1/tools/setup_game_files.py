@@ -40,6 +40,8 @@ step('Stand-in tutorial maps and music', 'make_standin_maps.py', game)
 step('Keyboard layout (User.ini)', 'controls_preset.py', game)
 # plain stargates ignore their second trigger in the retail scripts, so the menu gate never closes
 step('Stargate that never closes (StargateContent.u)', 'patch_gate_close.py', os.path.join(game, 'System', 'StargateContent.u'))
+# the chevrons light as a gate dials only in the PC build's script (#ifdefPC); this puts it back
+step('Chevrons light up as a stargate dials (StargateContent.u)', 'patch_gate_chevrons.py', game)
 # non-team chat, the Last Man Standing menu entry and the missing Replicator.ini
 step('Game script fixes (teamsay, Last Man Standing, Replicator.ini)', 'patches/sg1patch.py', game)
 # the health / shield bar never moves in story mode in the retail script (the same on the Xbox)
